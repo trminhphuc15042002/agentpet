@@ -1,8 +1,12 @@
+pub mod break_clock;
+pub mod care;
 pub mod cli;
 pub mod hooks;
+pub mod project_pets;
 pub mod server;
 pub mod statemap;
 pub mod transcript;
+pub mod usage;
 
 use std::sync::Mutex;
 use std::time::Duration;
@@ -303,6 +307,73 @@ fn set_pet_visible(app: tauri::AppHandle, visible: bool) {
     }
 }
 
+#[tauri::command]
+fn get_care_state(app: tauri::AppHandle) -> care::CareState {
+    if let Some(cm) = app.try_state::<care::CareManager>() {
+        cm.get_state()
+    } else {
+        care::CareState::default()
+    }
+}
+
+#[tauri::command]
+fn perform_care_action(app: tauri::AppHandle, action: String) -> care::CareState {
+    if let Some(cm) = app.try_state::<care::CareManager>() {
+        cm.perform_action(&action)
+    } else {
+        care::CareState::default()
+    }
+}
+
+#[tauri::command]
+fn get_project_pets(app: tauri::AppHandle) -> std::collections::HashMap<String, String> {
+    if let Some(store) = app.try_state::<project_pets::ProjectPetStore>() {
+        store.get_all()
+    } else {
+        std::collections::HashMap::new()
+    }
+}
+
+#[tauri::command]
+fn set_project_pet(app: tauri::AppHandle, project: String, pet_id: String) -> std::collections::HashMap<String, String> {
+    if let Some(store) = app.try_state::<project_pets::ProjectPetStore>() {
+        store.set_pet(project, pet_id)
+    } else {
+        std::collections::HashMap::new()
+    }
+}
+
+#[tauri::command]
+fn remove_project_pet(app: tauri::AppHandle, project: String) -> std::collections::HashMap<String, String> {
+    if let Some(store) = app.try_state::<project_pets::ProjectPetStore>() {
+        store.remove_pet(&project)
+    } else {
+        std::collections::HashMap::new()
+    }
+}
+
+#[tauri::command]
+fn get_usage_summary(app: tauri::AppHandle, project_filter: Option<String>, agent_filter: Option<String>) -> usage::UsageSummary {
+    if let Some(store) = app.try_state::<usage::UsageStore>() {
+        store.get_summary(project_filter.as_deref(), agent_filter.as_deref())
+    } else {
+        usage::UsageSummary {
+            total_tokens: 0,
+            total_sessions: 0,
+            total_projects: 0,
+            total_agents: 0,
+            breakdown: Vec::new(),
+        }
+    }
+}
+
+#[tauri::command]
+fn record_usage(app: tauri::AppHandle, project: String, agent: String, tokens: u64, sessions: u32) {
+    if let Some(store) = app.try_state::<usage::UsageStore>() {
+        store.record_tokens(&project, &agent, tokens, sessions);
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -331,11 +402,22 @@ pub fn run() {
             get_pet_visible,
             open_popover,
             log_debug,
-            set_hit_rect
+            set_hit_rect,
+            get_care_state,
+            perform_care_action,
+            get_project_pets,
+            set_project_pet,
+            remove_project_pet,
+            get_usage_summary,
+            record_usage
         ])
         .setup(|app| {
             server::start(app.handle().clone());
             app.manage(Mutex::new(HitRect::default()));
+            app.manage(care::CareManager::new());
+            app.manage(project_pets::ProjectPetStore::new());
+            app.manage(usage::UsageStore::new());
+
 
             // Restore where the user last dragged the pet. First run (no saved
             // position) parks it near the bottom-right of the primary screen;

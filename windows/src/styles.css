@@ -838,3 +838,22 @@ body.pop {
 .hist-agent { font-size: 10px; text-transform: uppercase; opacity: .6; min-width: 54px; }
 .hist-title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .hist-meta { font-size: 11px; white-space: nowrap; }
+
+/* ---- Usage tab (token dashboard) ---- */
+.usage-controls .row { gap: 12px; }
+.usage-controls select { min-width: 150px; }
+.usage-summary { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; padding: 10px; }
+.usage-stat { background: rgba(127,127,127,.10); border-radius: 10px; padding: 10px 12px; min-width: 0; }
+.usage-card { padding: 12px; }
+.usage-chart { display: flex; align-items: flex-end; gap: 7px; height: 130px; }
+.usage-bar-wrap { flex: 1; min-width: 0; height: 100%; display: flex; flex-direction: column; align-items: center; justify-content: flex-end; }
+.usage-bar { width: 100%; min-height: 3px; background: linear-gradient(180deg, #30d158, #0a84ff); border-radius: 5px 5px 2px 2px; transition: height .25s ease; }
+.usage-bar-label { margin-top: 5px; font-size: 9px; opacity: .55; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 100%; }
+.usage-empty { font-size: 12px; opacity: .55; padding: 14px 2px 2px; }
+.usage-table-wrap { overflow-x: auto; }
+.usage-table { width: 100%; border-collapse: collapse; font-size: 12px; }
+.usage-table th { text-align: left; font-size: 10px; text-transform: uppercase; letter-spacing: .04em; opacity: .55; font-weight: 600; padding: 0 8px 7px; }
+.usage-table td { padding: 7px 8px; border-top: 1px solid rgba(127,127,127,.12); }
+.usage-table td:nth-child(n+3), .usage-table th:nth-child(n+3) { text-align: right; }
+.usage-table td:first-child { max-width: 150px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+@media (max-width: 620px) { .usage-summary { grid-template-columns: repeat(2, 1fr); } }

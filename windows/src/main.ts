@@ -227,7 +227,7 @@ function maybeNotify(e: AgentEventPayload) {
   if (e.state === "done") {
     const slug = savedSlug();
     if (slug) { care.mutate(slug, (s) => care.recordMeal(s)); emit("care-updated"); sync.schedulePush(); }
-    if (e.project) usage.recordSession(e.project, e.agent);
+    if (e.project) { usage.recordSession(e.project, e.agent); emit("usage-updated"); }
     const now = Date.now();
     history.log({
       id: e.session, agent: e.agent, project: e.project ? basename(e.project) : "",
@@ -263,7 +263,7 @@ listen<{ agent: string; session: string; project: string; tokens: number }>("age
   const n = e.payload?.tokens || 0;
   if (n <= 0) return;
   const p = e.payload;
-  if (p.project) usage.recordTokens(p.project, p.agent, n);
+  if (p.project) { usage.recordTokens(p.project, p.agent, n); emit("usage-updated"); }
   const slug = savedSlug();
   if (!slug) return;
   care.mutate(slug, (s) => care.feedTokens(s, n));

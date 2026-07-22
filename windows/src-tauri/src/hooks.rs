@@ -247,15 +247,55 @@ fn binary_from(cmd: &str) -> String {
 fn opencode_plugin(binary: &str) -> String {
     let bin = serde_json::to_string(binary).unwrap_or_else(|_| format!("\"{}\"", binary));
     format!(
-        "// AgentPet integration (auto-generated, safe to delete to uninstall).\n\
-         const AGENTPET_BIN = {bin}\n\
-         export const AgentPet = async ({{ directory }}) => {{\n\
-         \x20 const sid = \"opencode:\" + (directory || \"default\")\n\
-         \x20 const send = (state) => {{ try {{ Bun.spawn([AGENTPET_BIN, \"hook\", \"--agent\", \"opencode\", \"--event\", state, \"--session\", sid, \"--project\", directory || \"\"]) }} catch (e) {{}} }}\n\
-         \x20 return {{ \"session.created\": async () => {{ send(\"working\") }}, \"session.idle\": async () => {{ send(\"done\") }} }}\n\
-         }}\n"
+        "// AgentPet integration for OpenCode & OpenChamber (auto-generated, safe to delete to uninstall).\n\
+         import {{ spawn as nodeSpawn }} from \"node:child_process\";\n\n\
+         const AGENTPET_BIN = {bin};\n\n\
+         const sendEvent = (state, sid, directory, extraArgs = []) => {{\n\
+         \x20 try {{\n\
+         \x20   const args = [\"hook\", \"--agent\", \"opencode\", \"--event\", state, \"--session\", sid, \"--project\", directory || \"\"];\n\
+         \x20   if (extraArgs.length) args.push(...extraArgs);\n\
+         \x20   if (typeof nodeSpawn === \"function\") {{\n\
+         \x20     const p = nodeSpawn(AGENTPET_BIN, args, {{ stdio: \"ignore\", detached: true }});\n\
+         \x20     if (p && p.unref) p.unref();\n\
+         \x20   }} else if (typeof Bun !== \"undefined\" && Bun.spawn) {{\n\
+         \x20     Bun.spawn([AGENTPET_BIN, ...args]);\n\
+         \x20   }}\n\
+         \x20 }} catch (e) {{}}\n\
+         }};\n\n\
+         export const AgentPet = async ({{ directory, sessionId }}) => {{\n\
+         \x20 const sid = \"opencode:\" + (sessionId || directory || \"default\");\n\
+         \x20 return {{\n\
+         \x20   \"session.created\": async () => sendEvent(\"working\", sid, directory),\n\
+         \x20   \"session.start\": async () => sendEvent(\"working\", sid, directory),\n\
+         \x20   \"tool.call\": async () => sendEvent(\"working\", sid, directory),\n\
+         \x20   \"permission.ask\": async () => sendEvent(\"waiting\", sid, directory),\n\
+         \x20   \"question.asked\": async () => sendEvent(\"waiting\", sid, directory),\n\
+         \x20   \"session.idle\": async () => sendEvent(\"done\", sid, directory),\n\
+         \x20   \"session.complete\": async () => sendEvent(\"done\", sid, directory),\n\
+         \x20   \"session.destroyed\": async () => sendEvent(\"done\", sid, directory)\n\
+         \x20 }};\n\
+         }};\n\
+         export default AgentPet;\n"
     )
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_opencode_plugin_generation() {
+        let bin = r#"C:\Program Files\AgentPet\agentpet.exe"#;
+        let js = opencode_plugin(bin);
+        assert!(js.contains("node:child_process"), "Should include node:child_process spawn");
+        assert!(js.contains("Bun"), "Should include Bun fallback");
+        assert!(js.contains("permission.ask"), "Should handle permission.ask event");
+        assert!(js.contains("session.created"), "Should handle session.created event");
+        assert!(js.contains("session.idle"), "Should handle session.idle event");
+        assert!(js.contains("sessionId || directory"), "Should handle sessionId fallback");
+    }
+}
+
 
 /// The Pi extension: reports session lifecycle through the `agentpet hook` CLI.
 fn pi_extension(binary: &str) -> String {

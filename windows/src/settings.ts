@@ -12,6 +12,7 @@ import { slice, type Rect } from "./pet";
 import * as care from "./care";
 import * as sync from "./sync";
 import * as history from "./history";
+import * as usage from "./usage";
 
 // ------------------------------------------------------------- segmented ----
 // macOS-style segmented controls: <span class="seg" data-key data-default>.
@@ -42,6 +43,7 @@ function initTabs() {
         p.classList.toggle("sel", p.dataset.page === b.dataset.tab);
       });
       if (b.dataset.tab === "care") { renderCare(); renderSync(); }
+      if (b.dataset.tab === "usage") renderUsage();
       if (b.dataset.tab === "history") renderHistory();
     };
   });
@@ -128,6 +130,70 @@ function renderCare() {
     .map((d) => `<div class="cbar-wrap" title="${fmtNum(d.tokens)}"><div class="cbar" style="height:${Math.max(3, Math.round((d.tokens / max) * 100))}%"></div><div class="cbar-lbl">${d.label}</div></div>`)
     .join("");
 }
+// ------------------------------------------------------------------ usage ----
+function renderUsage() {
+  const periodEl = document.getElementById("usage-period") as HTMLSelectElement | null;
+  const projectEl = document.getElementById("usage-project") as HTMLSelectElement | null;
+  const agentEl = document.getElementById("usage-agent") as HTMLSelectElement | null;
+  const rows = usage.list();
+  if (!periodEl || !projectEl || !agentEl) return;
+
+  const previousProject = projectEl.value || "all";
+  const previousAgent = agentEl.value || "all";
+  const projectNames = [...new Set(rows.map((r) => r.projectName))].sort((a, b) => a.localeCompare(b));
+  const agents = [...new Set(rows.map((r) => r.agent))].sort((a, b) => a.localeCompare(b));
+  projectEl.innerHTML = `<option value="all">${esc(t("All projects"))}</option>` + projectNames.map((p) => `<option value="${esc(p)}">${esc(p)}</option>`).join("");
+  agentEl.innerHTML = `<option value="all">${esc(t("All agents"))}</option>` + agents.map((a) => `<option value="${esc(a)}">${esc(a)}</option>`).join("");
+  projectEl.value = projectNames.includes(previousProject) ? previousProject : "all";
+  agentEl.value = agents.includes(previousAgent) ? previousAgent : "all";
+
+  const selectedProject = projectEl.value;
+  const selectedAgent = agentEl.value;
+  const filtered = rows.filter((r) => (selectedProject === "all" || r.projectName === selectedProject) && (selectedAgent === "all" || r.agent === selectedAgent));
+  const totalTokens = filtered.reduce((sum, r) => sum + r.tokens, 0);
+  const totalSessions = filtered.reduce((sum, r) => sum + r.sessions, 0);
+  const setTxt = (id: string, value: string) => { const el = document.getElementById(id); if (el) el.textContent = value; };
+  setTxt("usage-total-tokens", fmtNum(totalTokens));
+  setTxt("usage-total-sessions", fmtNum(totalSessions));
+  setTxt("usage-total-projects", String(new Set(filtered.map((r) => r.projectName)).size));
+  setTxt("usage-total-agents", String(new Set(filtered.map((r) => r.agent)).size));
+
+  const keyOf = (day: string) => periodEl.value === "monthly" ? day.slice(0, 7) : day;
+  const labelOf = (key: string) => periodEl.value === "monthly" ? key : new Date(`${key}T00:00:00`).toLocaleDateString([], { month: "short", day: "numeric" });
+  const buckets = new Map<string, { tokens: number; sessions: number }>();
+  for (const row of filtered) {
+    const key = keyOf(row.day);
+    const bucket = buckets.get(key) || { tokens: 0, sessions: 0 };
+    bucket.tokens += row.tokens;
+    bucket.sessions += row.sessions;
+    buckets.set(key, bucket);
+  }
+  const bucketRows = [...buckets.entries()].sort(([a], [b]) => a.localeCompare(b)).slice(-14);
+  const maxTokens = Math.max(1, ...bucketRows.map(([, b]) => b.tokens));
+  const chart = document.getElementById("usage-chart");
+  const empty = document.getElementById("usage-empty");
+  if (empty) empty.style.display = bucketRows.length ? "none" : "";
+  if (chart) chart.innerHTML = bucketRows.map(([key, bucket]) => `<div class="usage-bar-wrap" title="${fmtNum(bucket.tokens)} tokens"><div class="usage-bar" style="height:${Math.max(3, Math.round(bucket.tokens / maxTokens * 100))}%"></div><div class="usage-bar-label">${esc(labelOf(key))}</div></div>`).join("");
+
+  const grouped = new Map<string, { project: string; agent: string; tokens: number; sessions: number }>();
+  for (const row of filtered) {
+    const key = `${row.projectName}|${row.agent}`;
+    const item = grouped.get(key) || { project: row.projectName, agent: row.agent, tokens: 0, sessions: 0 };
+    item.tokens += row.tokens;
+    item.sessions += row.sessions;
+    grouped.set(key, item);
+  }
+  const tableRows = [...grouped.values()].sort((a, b) => b.tokens - a.tokens || a.project.localeCompare(b.project));
+  const body = document.getElementById("usage-table-body");
+  const tableEmpty = document.getElementById("usage-table-empty");
+  if (tableEmpty) tableEmpty.style.display = tableRows.length ? "none" : "";
+  if (body) body.innerHTML = tableRows.map((row) => `<tr><td>${esc(row.project)}</td><td>${esc(row.agent)}</td><td>${fmtNum(row.tokens)}</td><td>${fmtNum(row.sessions)}</td></tr>`).join("");
+}
+function initUsage() {
+  ["usage-period", "usage-project", "usage-agent"].forEach((id) => document.getElementById(id)?.addEventListener("change", renderUsage));
+  renderUsage();
+}
+listen("usage-updated", () => { if (document.querySelector('.page[data-page="usage"].sel')) renderUsage(); });
 // Refresh when the pet window feeds the pet, and periodically for the hunger clock.
 listen("care-updated", () => { if (document.querySelector('.page[data-page="care"].sel')) renderCare(); });
 setInterval(() => { if (document.querySelector('.page[data-page="care"].sel')) renderCare(); }, 30_000);
@@ -173,6 +239,7 @@ function initSync() {
   renderSync();
 }
 initSync();
+initUsage();
 
 // ---------------------------------------------------------------- agents ----
 interface AgentInfo {
@@ -1089,6 +1156,9 @@ function applyStatic() {
   set("tab-general", "General");
   set("tab-pet", "Pet");
   set("tab-bubble", "Bubble");
+  set("tab-care", "Care");
+  set("tab-usage", "Usage");
+  set("tab-history", "History");
   set("tab-about", "About");
   // general
   set("t-lang", "Language");
@@ -1138,6 +1208,28 @@ function applyStatic() {
   set("am-waiting", "Waiting");
   set("am-done", "Done");
   set("am-celebrate", "Celebrate");
+  // usage
+  set("t-usage-head", "Token usage");
+  set("t-usage-desc", "See where your agents spend tokens, grouped by project and agent. Data is kept locally on this device.");
+  set("t-usage-period", "Period");
+  set("usage-daily", "Daily");
+  set("usage-monthly", "Monthly");
+  set("t-usage-project", "Project");
+  set("usage-project-all", "All projects");
+  set("t-usage-agent", "Agent");
+  set("usage-agent-all", "All agents");
+  set("t-usage-tokens", "Tokens");
+  set("t-usage-sessions", "Sessions");
+  set("t-usage-projects", "Projects");
+  set("t-usage-agents", "Agents");
+  set("t-usage-chart", "Burn over time");
+  set("usage-empty", "No token usage recorded yet.");
+  set("t-usage-breakdown", "Breakdown");
+  set("t-usage-th-project", "Project");
+  set("t-usage-th-agent", "Agent");
+  set("t-usage-th-tokens", "Tokens");
+  set("t-usage-th-sessions", "Sessions");
+  set("usage-table-empty", "No matching usage.");
   // bubble
   set("t-appearance", "Appearance");
   set("t-theme", "Theme");

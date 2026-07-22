@@ -1,6 +1,5 @@
-// Per-project, per-agent daily token usage , a TypeScript port of the macOS
-// ProjectUsageStore. Logs where tokens go so the web dashboard can show it.
-// Pushed with the same device token as care sync; fully local until connected.
+// Per-project, per-agent token usage, ported from the macOS ProjectUsageStore.
+// Data stays local until the user connects an optional web profile.
 
 import { token as syncToken } from "./sync";
 
@@ -8,7 +7,7 @@ const BASE = "https://agentpet.thenightwatcher.online";
 const STORE_KEY = "ap_usage";
 const DIRTY_KEY = "ap_usage_dirty";
 
-interface Row {
+export interface UsageRow {
   projectId: string;
   projectName: string;
   agent: string;
@@ -35,23 +34,30 @@ function projectIdentity(path: string): { id: string; name: string } {
 function today(): string {
   const d = new Date();
   const y = d.getFullYear(), m = d.getMonth() + 1, day = d.getDate();
-  return `${y.toString().padStart(4, "0")}-${m.toString().padStart(2, "0")}-${day.toString().padStart(2, "0")}`;
+  return y.toString().padStart(4, "0") + "-" + m.toString().padStart(2, "0") + "-" + day.toString().padStart(2, "0");
 }
 
-function load(): Record<string, Row> {
+function load(): Record<string, UsageRow> {
   try { return JSON.parse(localStorage.getItem(STORE_KEY) || "{}"); } catch { return {}; }
 }
-function save(store: Record<string, Row>) { localStorage.setItem(STORE_KEY, JSON.stringify(store)); }
+function save(store: Record<string, UsageRow>) { localStorage.setItem(STORE_KEY, JSON.stringify(store)); }
 function loadDirty(): Set<string> {
   try { return new Set(JSON.parse(localStorage.getItem(DIRTY_KEY) || "[]")); } catch { return new Set(); }
 }
 function saveDirty(d: Set<string>) { localStorage.setItem(DIRTY_KEY, JSON.stringify([...d])); }
 
+/** Returns the locally recorded rows, newest first. */
+export function list(): UsageRow[] {
+  return Object.values(load()).sort((a, b) =>
+    b.day.localeCompare(a.day) || b.tokens - a.tokens || a.projectName.localeCompare(b.projectName) || a.agent.localeCompare(b.agent),
+  );
+}
+
 function record(project: string, agent: string, tokens: number, sessions: number) {
   if (!project || !agent || (tokens <= 0 && sessions <= 0)) return;
   const { id, name } = projectIdentity(project);
   const day = today();
-  const key = `${id}|${agent}|${day}`;
+  const key = id + "|" + agent + "|" + day;
   const store = load();
   const r = store[key] || { projectId: id, projectName: name, agent, day, tokens: 0, sessions: 0 };
   r.tokens += tokens;
@@ -81,12 +87,12 @@ export async function push(): Promise<void> {
   const dirty = loadDirty();
   if (!dirty.size) return;
   const store = load();
-  const snapshot = [...dirty].map((k) => store[k]).filter(Boolean) as Row[];
+  const snapshot = [...dirty].map((k) => store[k]).filter(Boolean) as UsageRow[];
   if (!snapshot.length) { saveDirty(new Set()); return; }
   try {
-    const res = await fetch(`${BASE}/api/usage/sync`, {
+    const res = await fetch(BASE + "/api/usage/sync", {
       method: "POST",
-      headers: { "content-type": "application/json", authorization: `Bearer ${tok}` },
+      headers: { "content-type": "application/json", authorization: "Bearer " + tok },
       body: JSON.stringify({ rows: snapshot }),
     });
     if (res.status === 401) return;
@@ -96,7 +102,7 @@ export async function push(): Promise<void> {
     const now = load();
     const still = loadDirty();
     for (const s of snapshot) {
-      const k = `${s.projectId}|${s.agent}|${s.day}`;
+      const k = s.projectId + "|" + s.agent + "|" + s.day;
       const cur = now[k];
       if (cur && cur.tokens === s.tokens && cur.sessions === s.sessions) still.delete(k);
     }

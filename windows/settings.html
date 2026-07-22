@@ -22,6 +22,10 @@
         <svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 21.35l-1.45-1.32C5.4 15.36 2 12.28 2 8.5 2 5.42 4.42 3 7.5 3c1.74 0 3.41.81 4.5 2.09C13.09 3.81 14.76 3 16.5 3 19.58 3 22 5.42 22 8.5c0 3.78-3.4 6.86-8.55 11.54L12 21.35z"/></svg>
         <span id="tab-care">Care</span>
       </button>
+      <button class="tab" data-tab="usage">
+        <svg viewBox="0 0 24 24" fill="currentColor"><path d="M4 19h3V9H4v10zm6 0h3V5h-3v14zm6 0h3V2h-3v17z"/></svg>
+        <span id="tab-usage">Usage</span>
+      </button>
       <button class="tab" data-tab="bubble">
         <svg viewBox="0 0 24 24" fill="currentColor"><path d="M1.5 6.75A3.25 3.25 0 0 1 4.75 3.5h7A3.25 3.25 0 0 1 15 6.75v3.5a3.25 3.25 0 0 1-3.25 3.25H8.6l-3.35 2.8a.5.5 0 0 1-.82-.38V13.5h.32A3.25 3.25 0 0 1 1.5 10.25v-3.5z"/><path d="M16.4 7.9h1.35a4.75 4.75 0 0 1 4.75 4.75v1.6a4.75 4.75 0 0 1-4.05 4.7v2.17a.5.5 0 0 1-.83.37l-2.86-2.49h-2.51a4.74 4.74 0 0 1-3.92-2.07h3.42a4.65 4.65 0 0 0 4.65-4.65V7.9z"/></svg>
         <span id="tab-bubble">Bubble</span>
@@ -211,6 +215,35 @@
             </div>
           </div>
           <div class="ghelp" id="t-sync-help">Fully optional. Everything works offline; connecting only adds the profile and leaderboard.</div>
+        </div>
+      </div>
+
+      <!-- =============================== USAGE =============================== -->
+      <div class="page" data-page="usage">
+        <div class="group">
+          <div class="ghead" id="t-usage-head">Token usage</div>
+          <div class="ghelp" id="t-usage-desc">See where your agents spend tokens, grouped by project and agent. Data is kept locally on this device.</div>
+          <div class="gcard usage-controls">
+            <label class="row"><span id="t-usage-period">Period</span><select id="usage-period"><option value="daily" id="usage-daily">Daily</option><option value="monthly" id="usage-monthly">Monthly</option></select></label>
+            <label class="row"><span id="t-usage-project">Project</span><select id="usage-project"><option value="all" id="usage-project-all">All projects</option></select></label>
+            <label class="row"><span id="t-usage-agent">Agent</span><select id="usage-agent"><option value="all" id="usage-agent-all">All agents</option></select></label>
+          </div>
+        </div>
+        <div class="group">
+          <div class="gcard usage-summary">
+            <div class="usage-stat"><div class="cs-label" id="t-usage-tokens">Tokens</div><div class="cs-val" id="usage-total-tokens">0</div></div>
+            <div class="usage-stat"><div class="cs-label" id="t-usage-sessions">Sessions</div><div class="cs-val" id="usage-total-sessions">0</div></div>
+            <div class="usage-stat"><div class="cs-label" id="t-usage-projects">Projects</div><div class="cs-val" id="usage-total-projects">0</div></div>
+            <div class="usage-stat"><div class="cs-label" id="t-usage-agents">Agents</div><div class="cs-val" id="usage-total-agents">0</div></div>
+          </div>
+        </div>
+        <div class="group">
+          <div class="ghead" id="t-usage-chart">Burn over time</div>
+          <div class="gcard usage-card"><div class="usage-chart" id="usage-chart"></div><div class="usage-empty" id="usage-empty">No token usage recorded yet.</div></div>
+        </div>
+        <div class="group">
+          <div class="ghead" id="t-usage-breakdown">Breakdown</div>
+          <div class="gcard usage-card"><div class="usage-table-wrap"><table class="usage-table"><thead><tr><th id="t-usage-th-project">Project</th><th id="t-usage-th-agent">Agent</th><th id="t-usage-th-tokens">Tokens</th><th id="t-usage-th-sessions">Sessions</th></tr></thead><tbody id="usage-table-body"></tbody></table></div><div class="usage-empty" id="usage-table-empty">No matching usage.</div></div>
         </div>
       </div>
 
