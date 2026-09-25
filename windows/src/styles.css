@@ -817,6 +817,13 @@ body.pop {
 .pop-ameta { display: flex; flex-direction: column; min-width: 0; flex: 1; }
 .pop-ameta b { font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .pop-ameta .cap { font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.pop-needs-count { font-size: 10px; font-weight: 700; color: #fff; background: #ff9f0a; border-radius: 999px; padding: 1px 7px; }
+.pop-need { display: flex; align-items: center; gap: 9px; padding: 5px 14px; cursor: pointer; border-radius: 6px; }
+.pop-need:hover { background: rgba(127,127,127,0.14); }
+.pop-need-badge { font-size: 10px; font-weight: 600; border-radius: 6px; padding: 1px 6px; white-space: nowrap; }
+.pop-need[data-kind="approval"] .pop-need-badge { background: rgba(255,69,58,0.18); color: #ff6961; }
+.pop-need[data-kind="reply"] .pop-need-badge { background: rgba(255,159,10,0.18); color: #ff9f0a; }
+.pop-need[data-kind="done"] .pop-need-badge { background: rgba(48,209,88,0.18); color: #30d158; }
 .pop-agent .sess-x { visibility: hidden; }
 .pop-agent:hover .sess-x { visibility: visible; }
 .pop-agent.openable { cursor: pointer; border-radius: 6px; transition: background 0.12s; }

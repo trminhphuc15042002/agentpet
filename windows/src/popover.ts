@@ -106,6 +106,7 @@ function applyStatic() {
   set("t-pop-care-ach", "Achievements");
   set("t-pop-care-burn", "Burn, last 7 days");
   syncCareMore();
+  set("t-pop-needs", "NEEDS YOU");
   set("t-pop-agents", "AGENTS");
   set("pop-clear", "Clear all");
   set("pop-empty", "Nothing running right now.");
@@ -139,10 +140,11 @@ function paint() {
     row.className = "pop-agent";
     row.dataset.state = s.state;
     const icon = agentIconUrl(s.agent);
+    const stale = (s.state === "working" || s.state === "waiting") && Date.now() - s.updatedAt > 180_000;
     row.innerHTML =
       `<span class="sess-dot"></span>` +
       `<span class="pop-ameta"><b>${esc(s.project ? basename(s.project) : s.session)}</b>` +
-      `<span class="cap">${esc([s.role, s.cost > 0 ? `$${s.cost.toFixed(2)}` : "", s.title || s.live || t(cap(s.state))].filter(Boolean).join(" · "))}</span></span>` +
+      `<span class="cap">${esc([s.role, s.cost > 0 ? `$${s.cost.toFixed(2)}` : "", s.title || s.live || t(cap(s.state)), stale ? `${elapsedString(s.updatedAt)} ${t("no update")}` : ""].filter(Boolean).join(" · "))}</span></span>` +
       (icon ? `<img class="dp-icon" src="${icon}" alt="">` : "") +
       `<span class="sess-time">${timeString(s)}</span>`;
     const x = document.createElement("button");
@@ -151,6 +153,7 @@ function paint() {
     x.onclick = (ev) => {
       ev.stopPropagation();
       const key = `${s.agent}:${s.session}`;
+      seenDone.add(key);
       store.removeKey(key);
       emit("session-dismiss", key);
       paint();
@@ -161,8 +164,8 @@ function paint() {
     if (s.agent === "opencode" && s.session.startsWith("opencode:")) {
       row.classList.add("openable");
       row.onclick = () => {
-        void invoke("open_session", { sessionId: s.session });
-        void getCurrentWindow().hide();
+        seenDone.add(`${s.agent}:${s.session}`);
+        openSession(s);
       };
     }
     list.appendChild(row);
@@ -179,6 +182,70 @@ function timeString(s: Session): string {
     return new Date(s.updatedAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
   }
   return elapsedString(s.stateSince);
+}
+
+// ---- needs you ---------------------------------------------------------------
+// A priority section pinned above the agent list: what actually waits on the
+// user (an approval gate, a question, or a turn that just finished). Working
+// sessions never mask these here, unlike the single pet mood.
+type NeedKind = "approval" | "reply" | "done";
+interface Need { s: Session; kind: NeedKind }
+const seenDone = new Set<string>();
+
+function needOf(s: Session, now: number): NeedKind | null {
+  if (s.pendingApproval) return "approval";
+  if (s.state === "waiting") return "reply";
+  if (s.state === "done" && now - s.updatedAt < 120_000 && !seenDone.has(`${s.agent}:${s.session}`)) return "done";
+  return null;
+}
+
+function needs(): Need[] {
+  const now = Date.now();
+  const order: Record<NeedKind, number> = { approval: 0, reply: 1, done: 2 };
+  return visible()
+    .map((s) => ({ s, kind: needOf(s, now) }))
+    .filter((x): x is Need => x.kind !== null)
+    .sort((a, b) => order[a.kind] - order[b.kind] || b.s.updatedAt - a.s.updatedAt);
+}
+
+function needLabel(kind: NeedKind): string {
+  return kind === "approval" ? t("Needs approval") : kind === "reply" ? t("Needs reply") : t("Just finished");
+}
+
+function openSession(s: Session) {
+  if (s.agent === "opencode" && s.session.startsWith("opencode:")) {
+    void invoke("open_session", { sessionId: s.session });
+    void getCurrentWindow().hide();
+  }
+}
+
+function renderNeeds() {
+  const wrap = document.getElementById("pop-needs-wrap") as HTMLElement | null;
+  const listEl = document.getElementById("pop-needs");
+  const countEl = document.getElementById("pop-needs-count");
+  if (!wrap || !listEl || !countEl) return;
+  const items = needs();
+  wrap.hidden = items.length === 0;
+  countEl.textContent = items.length ? String(items.length) : "";
+  listEl.innerHTML = "";
+  for (const { s, kind } of items) {
+    const row = document.createElement("div");
+    row.className = "pop-need";
+    row.dataset.kind = kind;
+    const icon = agentIconUrl(s.agent);
+    row.innerHTML =
+      `<span class="pop-need-badge">${esc(needLabel(kind))}</span>` +
+      `<span class="pop-ameta"><b>${esc(s.project ? basename(s.project) : s.session)}</b>` +
+      `<span class="cap">${esc([s.role, kind === "approval" ? s.pendingApproval?.tool : "", s.title || s.live].filter(Boolean).join(" · "))}</span></span>` +
+      (icon ? `<img class="dp-icon" src="${icon}" alt="">` : "") +
+      `<span class="sess-time">${timeString(s)}</span>`;
+    row.onclick = () => {
+      seenDone.add(`${s.agent}:${s.session}`);
+      openSession(s);
+      paintAndFit();
+    };
+    listEl.appendChild(row);
+  }
 }
 
 // ---- controls ----------------------------------------------------------------
@@ -265,7 +332,7 @@ function fitWindow() {
 }
 
 const origPaint = paint;
-function paintAndFit() { origPaint(); renderCare(); fitWindow(); }
+function paintAndFit() { origPaint(); renderCare(); renderNeeds(); fitWindow(); }
 
 listen("care-updated", () => paintAndFit());
 setInterval(paintAndFit, 1000); // live elapsed + prune
