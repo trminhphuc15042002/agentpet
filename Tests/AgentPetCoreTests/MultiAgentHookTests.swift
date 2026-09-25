@@ -121,8 +121,8 @@ final class MultiAgentHookTests: XCTestCase {
         XCTAssertTrue(js.contains("async setup(ctx)"))
         XCTAssertTrue(js.contains("ctx.event.subscribe"))
         XCTAssertTrue(js.contains("ctx.tool.hook"))
-        XCTAssertTrue(js.contains("session.idle"))
-        XCTAssertTrue(js.contains("session.created"))
+        XCTAssertTrue(js.contains("session.execution.succeeded"))
+        XCTAssertTrue(js.contains("session.execution.started"))
         XCTAssertTrue(js.contains("--agent"))
         XCTAssertTrue(js.contains("opencode"))
         XCTAssertTrue(HookInstaller.isOurs(js.replacingOccurrences(of: "\n", with: " ")))
@@ -200,7 +200,7 @@ final class MultiAgentHookTests: XCTestCase {
         // The plugin sends normalised state names directly.
         XCTAssertEqual(StateMapper.state(for: .opencode, eventName: "done"), .done)
         XCTAssertEqual(StateMapper.state(for: .opencode, eventName: "working"), .working)
-        XCTAssertEqual(StateMapper.state(for: .opencode, eventName: "session.idle"), .done)
+        XCTAssertEqual(StateMapper.state(for: .opencode, eventName: "session.execution.succeeded"), .done)
     }
 
     // MARK: - Session end clears the session
@@ -231,7 +231,7 @@ final class MultiAgentHookTests: XCTestCase {
     func testDiskRoundTripAllStyles() throws {
         let tmp = NSTemporaryDirectory() + "agentpet-test-\(UUID().uuidString)/"
         defer { try? FileManager.default.removeItem(atPath: tmp) }
-        let cases: [(AgentKind, String)] = [(.cursor, "cursor.json"), (.windsurf, "windsurf.json"), (.opencode, "plugin/agentpet.js"), (.antigravity, "config/hooks.json")]
+        let cases: [(AgentKind, String)] = [(.cursor, "cursor.json"), (.windsurf, "windsurf.json"), (.opencode, "plugins/agentpet.js"), (.antigravity, "config/hooks.json")]
         for (kind, file) in cases {
             let spec = AgentHooks.spec(for: kind)!
             let path = tmp + file

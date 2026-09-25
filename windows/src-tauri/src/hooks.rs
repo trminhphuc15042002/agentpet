@@ -50,7 +50,7 @@ fn spec(kind: &str) -> Option<Spec> {
             events: &["PreInvocation", "PreToolUse", "PostToolUse", "Stop"] },
         "kiro" => Spec { style: Style::KiroFlat, rel_path: &[".kiro", "agents", "default.json"],
             events: &["agentSpawn", "userPromptSubmit", "postToolUse", "stop"] },
-        "opencode" => Spec { style: Style::OpencodePlugin, rel_path: &[".config", "opencode", "plugin", "agentpet.js"],
+        "opencode" => Spec { style: Style::OpencodePlugin, rel_path: &[".config", "opencode", "plugins", "agentpet.js"],
             events: &[] },
         "droid" => Spec { style: Style::ClaudeNested, rel_path: &[".factory", "hooks.json"],
             events: &["SessionStart", "UserPromptSubmit", "PreToolUse", "Notification", "Stop", "SubagentStop", "SessionEnd"] },
@@ -185,7 +185,14 @@ fn install(kind: &str) -> std::io::Result<()> {
 
     if s.style == Style::OpencodePlugin {
         if let Some(dir) = path.parent() { std::fs::create_dir_all(dir)?; }
-        return std::fs::write(&path, opencode_plugin(&binary_from(&cmd)));
+        std::fs::write(&path, opencode_plugin(&binary_from(&cmd)))?;
+        // Migration: V1 stored the plugin in the singular `plugin/` dir, which
+        // OpenCode V2 ignores; remove it so it can never shadow the V2 file.
+        if let Some(home) = dirs::home_dir() {
+            let legacy = home.join(".config").join("opencode").join("plugin").join("agentpet.js");
+            let _ = std::fs::remove_file(legacy);
+        }
+        return Ok(());
     }
     if s.style == Style::PiExtension {
         if let Some(dir) = path.parent() { std::fs::create_dir_all(dir)?; }
@@ -223,6 +230,12 @@ fn uninstall(kind: &str) -> std::io::Result<()> {
     // Files we own outright: just delete.
     if kind == "copilot" || s.style == Style::OpencodePlugin || s.style == Style::PiExtension {
         let _ = std::fs::remove_file(&path);
+        if s.style == Style::OpencodePlugin {
+            if let Some(home) = dirs::home_dir() {
+                let legacy = home.join(".config").join("opencode").join("plugin").join("agentpet.js");
+                let _ = std::fs::remove_file(legacy);
+            }
+        }
         return Ok(());
     }
     let mut v = read_json(&path);
@@ -252,15 +265,83 @@ fn binary_from(cmd: &str) -> String {
 
 fn opencode_plugin(binary: &str) -> String {
     let bin = serde_json::to_string(binary).unwrap_or_else(|_| format!("\"{}\"", binary));
-    format!(
-        "// AgentPet integration (auto-generated, safe to delete to uninstall).\n\
-         const AGENTPET_BIN = {bin}\n\
-         export const AgentPet = async ({{ directory }}) => {{\n\
-         \x20 const sid = \"opencode:\" + (directory || \"default\")\n\
-         \x20 const send = (state) => {{ try {{ Bun.spawn([AGENTPET_BIN, \"hook\", \"--agent\", \"opencode\", \"--event\", state, \"--session\", sid, \"--project\", directory || \"\"]) }} catch (e) {{}} }}\n\
-         \x20 return {{ \"session.created\": async () => {{ send(\"working\") }}, \"session.idle\": async () => {{ send(\"done\") }} }}\n\
-         }}\n"
-    )
+    let template = r##"// AgentPet integration (auto-generated, safe to delete to uninstall).
+// OpenCode V2 plugin: a default-exported definition with { id, setup }.
+// V1 plugin modules (named exports returning a hooks object) are rejected by
+// the V2 loader, so this file targets V2 only.
+import { spawn } from "node:child_process"
+
+const AGENTPET_BIN = __BIN__
+
+function getString(value) {
+  return typeof value === "string" && value.length > 0 ? value : ""
+}
+function propsOf(event) {
+  return (event && (event.properties || event.data)) || {}
+}
+function extractSessionID(event) {
+  const p = propsOf(event)
+  return (
+    getString(p.info && p.info.id) ||
+    getString(p.sessionID) || getString(p.sessionId) || getString(p.session_id) ||
+    getString(p.id) ||
+    getString(event && event.sessionID) || getString(event && event.sessionId) ||
+    getString(event && event.session_id) ||
+    getString(event && event.session && event.session.id) ||
+    getString(event && event.id)
+  )
+}
+
+export default {
+  id: "agentpet",
+  async setup(ctx) {
+    const dir = (ctx && ctx.location && ctx.location.directory) || ""
+    const send = (state, sid) => {
+      try {
+        const child = spawn(AGENTPET_BIN,
+          ["hook", "--agent", "opencode", "--event", state, "--session", sid, "--project", dir],
+          { stdio: "ignore", detached: true, windowsHide: true })
+        child.on("error", () => {})
+        if (child.unref) child.unref()
+      } catch (e) {}
+    }
+    const sidFor = (event) => "opencode:" + (extractSessionID(event) || dir || "default")
+
+    if (ctx && ctx.tool && ctx.tool.hook) {
+      await ctx.tool.hook("execute.before", (event) => send("working", sidFor(event)))
+    }
+
+    if (ctx && ctx.event && ctx.event.subscribe) {
+      const controller = new AbortController()
+      void (async () => {
+        try {
+          for await (const event of ctx.event.subscribe({ signal: controller.signal })) {
+            const type = (event && event.type) || ""
+            const sid = sidFor(event)
+            // OpenCode V2 event names. V1 names (session.status /
+            // session.idle / session.updated) are no longer emitted, so the
+            // turn end comes from session.execution.*.
+            if (type === "permission.asked" || type === "session.permission.create") {
+              send("waiting", sid)
+            } else if (type === "session.execution.succeeded" ||
+                       type === "session.execution.failed" ||
+                       type === "session.execution.interrupted" ||
+                       type === "session.deleted") {
+              send("done", sid)
+            } else if (type === "session.execution.started" ||
+                       type === "session.tool.called" ||
+                       type === "session.tool.input.started") {
+              send("working", sid)
+            }
+          }
+        } catch (e) {}
+      })()
+      return () => controller.abort()
+    }
+  },
+}
+"##;
+    template.replace("__BIN__", &bin)
 }
 
 /// The Pi extension: reports session lifecycle through the `agentpet hook` CLI.
@@ -312,4 +393,45 @@ fn enable_codex_hooks() {
     };
     if let Some(dir) = path.parent() { let _ = std::fs::create_dir_all(dir); }
     let _ = std::fs::write(&path, updated);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn opencode_plugin_is_v2_shape() {
+        let js = opencode_plugin("C:\\bin\\agentpet.exe");
+        // V2 loader requires a default-exported { id, setup } definition.
+        assert!(js.contains("export default"), "must default-export");
+        assert!(js.contains("id: \"agentpet\""), "must carry an id");
+        assert!(js.contains("async setup(ctx)"), "must expose setup(ctx)");
+        // V1's named export / Bun.spawn must be gone.
+        assert!(!js.contains("export const AgentPet"), "must not use V1 shape");
+        assert!(!js.contains("Bun.spawn"), "must not rely on Bun");
+        assert!(js.contains("node:child_process"), "must import node spawn");
+        // Binary path is embedded as a JS string literal.
+        assert!(js.contains("C:\\\\bin\\\\agentpet.exe"), "binary path embedded");
+    }
+
+    #[test]
+    fn opencode_plugin_uses_v2_events() {
+        let js = opencode_plugin("/x/agentpet");
+        assert!(js.contains("session.execution.succeeded"), "done on execution.succeeded");
+        assert!(js.contains("session.execution.started"), "working on execution.started");
+        assert!(js.contains("ctx.event.subscribe"), "subscribes to the event bus");
+        assert!(js.contains("ctx.tool.hook"), "hooks tool execution");
+        // V1 event names are no longer emitted by OpenCode V2.
+        assert!(!js.contains("\"session.idle\""), "must not wait for session.idle");
+        assert!(!js.contains("\"session.status\""), "must not wait for session.status");
+    }
+
+    #[test]
+    fn opencode_installs_into_plugins_dir() {
+        let spec = spec("opencode").expect("opencode spec");
+        assert_eq!(
+            spec.rel_path,
+            &[".config", "opencode", "plugins", "agentpet.js"]
+        );
+    }
 }

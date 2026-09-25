@@ -67,10 +67,15 @@ public enum StateMapper {
             }
         case .opencode:
             // The plugin sends normalised states directly (handled above); these
-            // map the raw opencode event names as a fallback.
+            // map the raw opencode V2 event names as a fallback. V1 names
+            // (session.idle / session.status) are no longer emitted.
             switch eventName {
-            case "session.created": return .working
-            case "session.idle": return .done
+            case "session.created": return .registered
+            case "session.execution.started", "session.tool.called",
+                 "session.tool.input.started": return .working
+            case "session.execution.succeeded", "session.execution.failed",
+                 "session.execution.interrupted", "session.deleted": return .done
+            case "permission.asked", "session.permission.create": return .waiting
             default: return nil
             }
         case .antigravity:

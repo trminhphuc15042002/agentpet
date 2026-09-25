@@ -246,17 +246,20 @@ public enum HookInstaller {
                   for await (const event of ctx.event.subscribe({ signal: controller.signal })) {
                     const type = (event && event.type) || ""
                     const sid = sidFor(event)
-                    if (type === "session.status") {
-                      // idle => done, anything else (busy/retry) => working.
-                      const status = propsOf(event).status
-                      send(status && status.type === "idle" ? "done" : "working", sid)
-                    } else if (type === "session.created" || type === "session.updated") {
-                      send("working", sid)
-                    } else if (type === "permission.asked" || type === "question.asked") {
+                    // OpenCode V2 event names. V1 names (session.status /
+                    // session.idle / session.updated) are no longer emitted, so
+                    // the turn end comes from session.execution.*.
+                    if (type === "permission.asked" || type === "session.permission.create") {
                       send("waiting", sid)
-                    } else if (type === "session.idle" || type === "session.deleted" ||
-                               type === "session.compacted" || type === "session.error") {
+                    } else if (type === "session.execution.succeeded" ||
+                               type === "session.execution.failed" ||
+                               type === "session.execution.interrupted" ||
+                               type === "session.deleted") {
                       send("done", sid)
+                    } else if (type === "session.execution.started" ||
+                               type === "session.tool.called" ||
+                               type === "session.tool.input.started") {
+                      send("working", sid)
                     }
                   }
                 } catch (e) {}
