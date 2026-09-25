@@ -164,7 +164,7 @@ Vẽ trong surface hiện có, tận dụng pattern đã có thay vì surface m�
 
 - **Badge trên pet**: pet surface thêm một badge nhỏ số subagent đang chạy + chấm màu "cần bạn" khi có subagent/session `waiting`.
 - **Roster gọn**: tái dùng danh sách session trong `bubble.ts` (mỗi row đã có icon slot, title, project, state, clock, và badge nhóm `.xn`). Thêm inline `👥 N` cho session có subagent; không dựng list hay panel mới.
-- **Badge trên pet**: hiển thị `👥 N` cạnh canvas pet hiện có. Đây là tín hiệu T1; role-level roster / icon vai trò để T2 khi event data đủ tin cậy.
+- **Badge trên pet**: hiển thị `👥 N` cạnh canvas pet hiện có; hover hiển thị role/description của các child đang chạy. Không cần roster/panel riêng.
 
 ### 6.2 Không làm (đẩy sang T2/T3)
 

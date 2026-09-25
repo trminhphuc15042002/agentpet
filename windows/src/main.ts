@@ -178,9 +178,12 @@ function pickMoodLine(mood: string) {
 function render() {
   const sessions = store.active().filter((s) => ownsProject(s.project));
   const subagentCount = sessions.reduce((count, session) => count + session.subagents.length, 0);
+  const subagentRoles = sessions.flatMap((session) => session.subagents.map((child) => child.role.trim() || "Subagent"));
   partyBadge.hidden = subagentCount === 0;
   partyBadge.textContent = `👥 ${subagentCount}`;
-  partyBadge.title = `${subagentCount} active subagent${subagentCount === 1 ? "" : "s"}`;
+  partyBadge.title = subagentRoles.length
+    ? `Active subagents:\n${subagentRoles.join("\n")}`
+    : `${subagentCount} active subagent${subagentCount === 1 ? "" : "s"}`;
   const resolved = aggregateMood(sessions);
 
   if (resolved === "done" && lastResolved !== "done") {

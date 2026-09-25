@@ -632,9 +632,8 @@ export class BubbleRenderer {
       badge.textContent = `×${g.count}`;
     }
 
-    // Agent Party T1 stays inside the existing row: no child window, canvas,
-    // or timer. Roles are available in the session store for a later expanded
-    // roster; this compact count is deliberately the low-cost first surface.
+    // Agent Party stays inside the existing row: no child window, canvas, or
+    // timer. Hover reveals the live role descriptions without a new panel.
     let party = el.querySelector<HTMLElement>(".party-count");
     const children = s.subagents?.length ?? 0;
     if (children > 0) {
@@ -644,7 +643,7 @@ export class BubbleRenderer {
         el.appendChild(party);
       }
       party.textContent = `👥 ${children}`;
-      party.title = `${children} active subagent${children === 1 ? "" : "s"}`;
+      party.title = s.subagents.map((child) => child.role.trim() || "Subagent").join("\n");
     } else {
       party?.remove();
     }
