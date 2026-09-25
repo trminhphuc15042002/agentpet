@@ -12,6 +12,7 @@ import { agentIconUrl } from "./icons";
 import { elapsedString } from "./bubble";
 import { t } from "./i18n";
 import * as care from "./care";
+import * as sync from "./sync";
 import { savedSlug, petDisplayName, getLibrary } from "./catalog";
 
 const store = new SessionStore();
@@ -50,6 +51,13 @@ function renderCare() {
   setTxt("pop-care-level", `${t("Lv")} ${care.displayLevel(s.xp)}`);
   setTxt("pop-care-stage", t(care.stageName(internal)));
   setTxt("pop-care-hunger", t(care.hunger(s)));
+  // Show that this pet is tied to a linked GitHub profile (levels restore from it).
+  const syncBadge = document.getElementById("pop-care-sync");
+  if (syncBadge) {
+    const linked = sync.signedIn();
+    syncBadge.hidden = !linked;
+    if (linked) syncBadge.title = t("Connected to your profile");
+  }
   const fill = document.getElementById("pop-care-xpfill");
   if (fill) fill.style.width = `${Math.round(care.levelProgress(s.xp) * 100)}%`;
   setTxt("pop-care-xp", `${s.xp} XP`);
@@ -239,6 +247,8 @@ listen("popover-shown", () => {
   size.value = localStorage.getItem("ap_pet_size") || "100";
   invoke<boolean>("get_pet_visible").then((v) => { showPet.checked = v; }).catch(() => {});
   emit("sessions-request", null);
+  // Refresh the level from the linked account so the HUD shows the cloud value.
+  void sync.autoRestore().then(() => paintAndFit());
   paintAndFit();
 });
 emit("sessions-request", null);

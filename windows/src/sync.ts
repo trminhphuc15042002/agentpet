@@ -124,6 +124,22 @@ export function schedulePush(afterMs = 30_000) {
   pushTimer = window.setTimeout(() => { void push(); }, afterMs);
 }
 
+let lastPullAt = 0;
+/** ms epoch of the last cloud pull this session (0 = never). */
+export function lastSyncAt(): number { return lastPullAt; }
+
+/** Pull cloud progress on demand, throttled. Used when the HUD / Care tab
+ *  opens, so the shown level reflects the account, not just the local copy.
+ *  Grow-only in restore(), so this can never lower a pet. */
+export async function autoRestore(minIntervalMs = 60_000): Promise<number> {
+  if (!signedIn()) return 0;
+  if (lastPullAt && Date.now() - lastPullAt < minIntervalMs) return 0;
+  lastPullAt = Date.now();
+  const n = await restore();
+  if (n > 0) schedulePush(2000);
+  return n;
+}
+
 /** Pulls cloud stats and merges them grow-only into local pets. Returns count. */
 export async function restore(): Promise<number> {
   const tok = token();

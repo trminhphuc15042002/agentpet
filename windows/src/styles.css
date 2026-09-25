@@ -884,6 +884,8 @@ body.pop {
    card edges, which is what made the first version look broken. */
 .pop-care { gap: 8px; padding: 12px 14px 4px; }
 .pop-care .care-name { cursor: default; font-size: 15px; }
+.pop-care .care-right { display: flex; flex-direction: column; align-items: flex-end; gap: 2px; }
+.pop-care .pop-sync { font-size: 11px; opacity: .6; }
 .pop-care .care-quick { display: grid; grid-template-columns: repeat(4, 1fr); gap: 6px; }
 .pop-care .cq { background: rgba(127,127,127,.10); border-radius: 8px; padding: 6px 4px; text-align: center; min-width: 0; }
 .pop-care .cq b { display: block; font-size: 14px; font-weight: 700; line-height: 1.15; }

@@ -211,6 +211,8 @@ function initSync() {
   });
   document.getElementById("sync-disconnect")?.addEventListener("click", () => { sync.disconnect(); renderSync(); });
   renderSync();
+  // Signed in? Pull the account's progress so the level shown is the cloud one.
+  if (sync.signedIn()) void sync.autoRestore(0).then((n) => { if (n > 0) renderCare(); });
 }
 initSync();
 
