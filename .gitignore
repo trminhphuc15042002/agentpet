@@ -29,3 +29,19 @@ landing/node_modules/
 
 # Local agent memory , never commit
 /CLAUDE.md
+
+# Local Windows build config (machine-specific Windows Kits paths)
+windows/src-tauri/.cargo/
+
+# Local scratch
+windows/src-tauri/scratch/
+
+# AI planning scratch
+.hermes/
+
+# Throwaway port diffs / patch helpers
+windows/diff*.txt
+windows/patch.py
+
+# Rust build output
+windows/src-tauri/target/
