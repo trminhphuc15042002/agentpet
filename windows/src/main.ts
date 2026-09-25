@@ -275,13 +275,30 @@ function snugBubble() {
 
 // Tray tooltip mirrors the macOS menu bar count (N working / N waiting).
 let lastTray = "";
+let lastTraySessions = "";
 function reportTrayStatus(sessions: ReturnType<SessionStore["active"]>) {
   const working = sessions.filter((s) => s.state === "working").length;
   const waiting = sessions.filter((s) => s.state === "waiting").length;
   const sig = `${working}/${waiting}`;
-  if (sig === lastTray) return;
-  lastTray = sig;
-  invoke("set_tray_status", { working, waiting }).catch(() => {});
+  if (sig !== lastTray) {
+    lastTray = sig;
+    invoke("set_tray_status", { working, waiting }).catch(() => {});
+  }
+  // Tray "Sessions" submenu: only OpenCode sessions can be opened in OpenChamber.
+  const rows = sessions
+    .filter((s) => s.agent === "opencode" && s.session.startsWith("opencode:"))
+    .slice(0, 12)
+    .map((s) => ({
+      session: s.session,
+      label:
+        `${s.project ? s.project.split(/[\\/]/).filter(Boolean).pop() : s.session}` +
+        `${s.role ? ` · ${s.role}` : ""} · ${s.state}`,
+    }));
+  const rsig = rows.map((r) => `${r.session}|${r.label}`).join("\n");
+  if (rsig !== lastTraySessions) {
+    lastTraySessions = rsig;
+    invoke("set_tray_sessions", { sessions: rows }).catch(() => {});
+  }
 }
 
 // --- notifications ------------------------------------------------------------

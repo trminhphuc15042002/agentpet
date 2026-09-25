@@ -162,6 +162,45 @@ async fn open_settings(app: tauri::AppHandle) {
 }
 
 /// Open an external link in the default browser (About tab buttons).
+/// A row for the tray's "Sessions" submenu, built by the pet window.
+#[derive(serde::Deserialize)]
+struct TraySession {
+    session: String,
+    label: String,
+}
+
+/// Rebuild the tray's "Sessions" submenu from the live session list (the pet
+/// window pushes it every render). Picking an item opens that session in
+/// OpenChamber, same deep link as the `open_session` command.
+#[tauri::command]
+fn set_tray_sessions(app: tauri::AppHandle, sessions: Vec<TraySession>) {
+    use tauri::menu::{Menu, MenuItem, PredefinedMenuItem, Submenu};
+    let Some(items) = app.try_state::<Mutex<TrayItems>>() else { return };
+    let Ok(it) = items.lock() else { return };
+    let header = match read_lang().as_str() {
+        "vi" => "Phiên đang chạy",
+        "zh" => "会话",
+        "zh-TW" => "工作階段",
+        _ => "Sessions",
+    };
+    let Ok(sub) = Submenu::with_id(&app, "sessions", header, true) else { return };
+    if sessions.is_empty() {
+        if let Ok(none) = MenuItem::with_id(&app, "no_sessions", "—", false, None::<&str>) {
+            let _ = sub.append(&none);
+        }
+    }
+    for s in sessions.iter().take(12) {
+        if let Ok(mi) = MenuItem::with_id(&app, format!("session:{}", s.session), &s.label, true, None::<&str>) {
+            let _ = sub.append(&mi);
+        }
+    }
+    let Ok(sep) = PredefinedMenuItem::separator(&app) else { return };
+    let mut entries: Vec<&dyn tauri::menu::IsMenuItem<tauri::Wry>> =
+        vec![&it.show_pet, &it.settings, &it.updates, &sep, &sub, &it.quit];
+    let Ok(menu) = Menu::with_items(&app, &entries) else { return };
+    let _ = it.tray.set_menu(Some(menu));
+}
+
 #[tauri::command]
 fn open_url(url: String) {
     if !(url.starts_with("https://") || url.starts_with("http://")) {
@@ -439,6 +478,7 @@ pub fn run() {
             sync_project_windows,
             set_lang,
             set_tray_status,
+            set_tray_sessions,
             set_pet_visible,
             get_pet_visible,
             open_popover,
@@ -587,6 +627,9 @@ pub fn run() {
                         set_pet_visible(app.clone(), !now_visible);
                     }
                     "settings" => open_settings_impl(app.clone()),
+                    id if id.starts_with("session:") => {
+                        open_session(id["session:".len()..].to_string());
+                    }
                     "check_updates" => {
                         // The updater plugin is driven from JS; the pet window is
                         // always alive (hidden, never closed) so it receives this
