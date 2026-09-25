@@ -155,6 +155,7 @@ fn handle_event(app: &AppHandle, body: &str) {
     let session = str_of(&v, "session").to_string();
     let project = str_of(&v, "project").to_string();
     let message = str_of(&v, "message").to_string();
+    let role = str_of(&v, "role").to_string();
     let tool = str_of(&v, "tool").to_string();
     let file = str_of(&v, "file").to_string();
     let desc = str_of(&v, "desc").to_string();
@@ -223,6 +224,7 @@ fn handle_event(app: &AppHandle, body: &str) {
         let payload = serde_json::json!({
             "agent": agent, "state": state, "session": session, "project": project,
             "message": message, "tool": tool, "file": file, "desc": desc,
+            "role": role,
             "event": event, "title": title, "ts": ts,
             "terminalProgram": terminal_program, "terminalFocusUrl": terminal_focus_url,
         });

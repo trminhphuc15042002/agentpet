@@ -14,6 +14,9 @@ export interface Session {
   live: string;
   /// Conversation title from the transcript (Claude), when known.
   title: string;
+  /// OpenCode agent/role currently driving the session (build, plan, a forge
+  /// subagent like worker-high, ...). Empty for agents that do not report one.
+  role: string;
   tool: string;
   updatedAt: number;
   stateSince: number;
@@ -35,6 +38,7 @@ export interface AgentEventPayload {
   desc?: string;
   event?: string;
   title?: string | null;
+  role?: string;
   ts?: number;
   terminalProgram?: string;
   terminalFocusUrl?: string;
@@ -74,6 +78,7 @@ export class SessionStore {
       project: e.project || prev?.project || "",
       live,
       title: e.title ?? prev?.title ?? "",
+      role: e.role ?? prev?.role ?? "",
       tool: e.tool ?? "",
       updatedAt: now,
       stateSince: prev && prev.state === e.state ? prev.stateSince : now,

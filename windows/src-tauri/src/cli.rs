@@ -25,6 +25,7 @@ pub fn run_hook(args: &[String]) {
             session: flag(args, "--session").unwrap_or_default(),
             project: flag(args, "--project").unwrap_or_default(),
             message: flag(args, "--message").unwrap_or_default(),
+            role: flag(args, "--role").unwrap_or_default(),
             terminal_program,
             terminal_focus_url,
             ..Payload::default()
@@ -97,6 +98,7 @@ pub fn run_hook(args: &[String]) {
             .to_string(),
         transcript: first_str(&v, &["transcript_path", "transcriptPath"]).unwrap_or_default(),
         subagent: first_str(&v, &["agent_id", "subagent_id", "agentId"]).unwrap_or_default(),
+        role: String::new(),
         terminal_program,
         terminal_focus_url,
     };
@@ -225,6 +227,7 @@ struct Payload {
     session: String,
     project: String,
     message: String,
+    role: String,
     tool: String,
     file: String,
     desc: String,
@@ -239,6 +242,7 @@ impl Payload {
         serde_json::json!({
             "agent": self.agent, "event": self.event, "session": self.session,
             "project": self.project, "message": self.message, "tool": self.tool,
+            "role": self.role,
             "file": self.file, "desc": self.desc, "transcript": self.transcript,
             "subagent": self.subagent,
             "terminalProgram": self.terminal_program, "terminalFocusUrl": self.terminal_focus_url,

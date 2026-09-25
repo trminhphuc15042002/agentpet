@@ -224,10 +224,13 @@ public enum HookInstaller {
           id: "agentpet",
           async setup(ctx) {
             const dir = (ctx && ctx.location && ctx.location.directory) || ""
+            const roles = new Map()
             const send = (state, sid) => {
               try {
-                const child = spawn(AGENTPET_BIN,
-                  ["hook", "--agent", "opencode", "--event", state, "--session", sid, "--project", dir],
+                const args = ["hook", "--agent", "opencode", "--event", state, "--session", sid, "--project", dir]
+                const role = roles.get(sid)
+                if (role) args.push("--role", role)
+                const child = spawn(AGENTPET_BIN, args,
                   { stdio: "ignore", detached: true, windowsHide: true })
                 child.on("error", () => {})
                 if (child.unref) child.unref()
@@ -248,8 +251,12 @@ public enum HookInstaller {
                     const sid = sidFor(event)
                     // OpenCode V2 event names. V1 names (session.status /
                     // session.idle / session.updated) are no longer emitted, so
-                    // the turn end comes from session.execution.*.
-                    if (type === "permission.asked" || type === "session.permission.create") {
+                    // the turn end comes from session.execution.*. Remember the
+                    // driving agent/role so state reports carry it.
+                    if (type === "session.agent.selected") {
+                      const role = (propsOf(event).agent) || ""
+                      if (role) roles.set(sid, role)
+                    } else if (type === "permission.asked" || type === "session.permission.create") {
                       send("waiting", sid)
                     } else if (type === "session.execution.succeeded" ||
                                type === "session.execution.failed" ||

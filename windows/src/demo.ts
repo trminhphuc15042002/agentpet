@@ -110,6 +110,7 @@ export function initDemo() {
       state,
       project: SAMPLE_PROJECT[kind] + (n > 1 ? ` #${n}` : ""),
       title: SAMPLE_TITLE[kind] ?? "",
+      role: "",
       live: sampleMessage(state),
       tool: "",
       updatedAt: now,
