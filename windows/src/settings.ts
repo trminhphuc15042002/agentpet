@@ -270,6 +270,17 @@ function renderAgents() {
   }
 }
 
+/// FNV-1a 32-bit hash, small and stable across runs. Used for the custom-pet
+/// slug so the same imported spritesheet always maps to the same identity.
+function fnv1a(s: string): number {
+  let h = 0x811c9dc5;
+  for (let i = 0; i < s.length; i++) {
+    h ^= s.charCodeAt(i);
+    h = (h * 0x01000193) >>> 0;
+  }
+  return h;
+}
+
 // ------------------------------------------------------------------ pet ----
 // macOS model: the pager shows your INSTALLED pets (library); the full catalog
 // lives in the Browse dialog where "Get" adds a pet to the library.
@@ -606,7 +617,10 @@ function initCreate() {
     filePick.click();
   };
   createBtn.onclick = () => {
-    const slug = `local-${Date.now()}`;
+    // ponytail: slug from image content (FNV-1a), not Date.now(), so re-creating
+    // or re-importing the SAME sheet keeps the same slug -> same XP. A timestamp
+    // slug spawned a fresh empty care bucket every create (level reset).
+    const slug = `local-${fnv1a(dataUrl).toString(16)}`;
     addToLibrary({ slug, name: name.value.trim(), url: dataUrl, custom: true });
     void pick({ slug, name: name.value.trim(), url: dataUrl, custom: true });
     modal.hidden = true;
