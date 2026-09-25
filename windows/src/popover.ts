@@ -308,6 +308,16 @@ window.addEventListener("keydown", (e) => {
 
 listen<AgentEventPayload>("agent-event", (e) => { store.update(e.payload); paintAndFit(); });
 listen<string>("agent-end", (e) => { store.remove(e.payload); paintAndFit(); });
+// The approval gate is broadcast to every window; mirror it here so the
+// "Needs approval" bucket works in the popover too.
+listen<{ id: string; session: string; tool: string; summary: string }>("agent-approval", (e) => {
+  store.setApproval(e.payload.session, { id: e.payload.id, tool: e.payload.tool, summary: e.payload.summary });
+  paintAndFit();
+});
+listen<{ id: string; session: string }>("agent-approval-resolved", (e) => {
+  store.clearApproval(e.payload.session);
+  paintAndFit();
+});
 listen<Session>("session-snapshot", (e) => { store.seed(e.payload); paintAndFit(); });
 // Re-sync + refresh whenever the popover is shown again.
 listen("popover-shown", () => {
