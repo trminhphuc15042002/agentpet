@@ -1,5 +1,6 @@
-// Prevents an extra console window on Windows release builds.
-#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+// Prevents a console window on Windows builds.
+#![windows_subsystem = "windows"]
+
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();

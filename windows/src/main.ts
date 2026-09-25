@@ -71,16 +71,7 @@ applyPet();
 // Simple synthesized chimes (no audio assets needed). Per-event enable, like
 // the macOS SoundSettings (done = high glass-ish, waiting = lower submarine).
 let audioCtx: AudioContext | null = null;
-function chime(event: "done" | "waiting") {
-  const key = event === "done" ? "ap_sound_done" : "ap_sound_waiting";
-  const legacy = localStorage.getItem("ap_sound"); // pre-split toggle
-  const enabled = localStorage.getItem(key) ?? (legacy === "0" ? "0" : "1");
-  if (enabled === "0") return;
-  // Custom uploaded sound wins (mac SoundSettings custom file).
-  const data = localStorage.getItem(`ap_sound_${event}_data`);
-  if (data) {
-    try { void new Audio(data).play(); return; } catch {}
-  }
+function playBuiltinChime(event: "done" | "waiting") {
   try {
     audioCtx = audioCtx || new AudioContext();
     const o = audioCtx.createOscillator();
@@ -93,6 +84,28 @@ function chime(event: "done" | "waiting") {
     o.start();
     o.stop(audioCtx.currentTime + 0.13);
   } catch {}
+}
+
+function chime(event: "done" | "waiting") {
+  const key = event === "done" ? "ap_sound_done" : "ap_sound_waiting";
+  const legacy = localStorage.getItem("ap_sound");
+  const enabled = localStorage.getItem(key) ?? (legacy === "0" ? "0" : "1");
+  if (enabled === "0") return;
+  const data = localStorage.getItem(`ap_sound_${event}_data`);
+  if (data) {
+    try {
+      const a = new Audio(data);
+      const p = a.play();
+      if (p !== undefined && typeof (p as Promise<void>).then === "function") {
+        (p as Promise<void>).catch(() => playBuiltinChime(event));
+        return;
+      }
+      return;
+    } catch {
+      // fall through to builtin
+    }
+  }
+  playBuiltinChime(event);
 }
 
 // --- pick + load a pet sprite -------------------------------------------------
@@ -259,16 +272,74 @@ listen<string>("agent-end", (e) => {
   render();
 });
 // Tokens burned by an agent feed the currently-selected pet (Claude for now).
-listen<{ agent: string; session: string; project: string; tokens: number }>("agent-tokens", (e) => {
-  const n = e.payload?.tokens || 0;
-  if (n <= 0) return;
+// OpenCode may send breakdown + xp (cache excluded from Care); legacy agents send total only.
+// Runtime event payloads are untrusted — validate finite non-negative numbers locally.
+function validTokenNum(n: unknown): n is number {
+  return Number.isSafeInteger(n) && (n as number) >= 0;
+}
+listen<{
+  agent: string;
+  session: string;
+  project: string;
+  tokens: number;
+  xp?: number;
+  input?: number;
+  output?: number;
+  cache?: number;
+}>("agent-tokens", (e) => {
   const p = e.payload;
-  if (p.project) { usage.recordTokens(p.project, p.agent, n); emit("usage-updated"); }
-  const slug = savedSlug();
-  if (!slug) return;
-  care.mutate(slug, (s) => care.feedTokens(s, n));
-  emit("care-updated");
-  sync.schedulePush();
+  if (!p) return;
+  // !== undefined: omitted = legacy absence; explicit null = present/malformed.
+  const hasBreakdown =
+    (p.input !== undefined) || (p.output !== undefined) || (p.cache !== undefined);
+  let total: number;
+  let xp: number;
+  let input = 0;
+  let output = 0;
+  let cache = 0;
+  if (hasBreakdown) {
+    // Partial breakdown: omitted fields default to 0; explicit null / bad ints reject.
+    const coerce = (n: unknown): number | null =>
+      n === undefined ? 0 : validTokenNum(n) ? n : null;
+    const i = coerce(p.input);
+    const o = coerce(p.output);
+    const c = coerce(p.cache);
+    if (i === null || o === null || c === null) return;
+    input = i;
+    output = o;
+    cache = c;
+    // Always derive XP; ignore explicit xp so cache can never feed Care.
+    total = input + output + cache;
+    xp = input + output;
+    if (!validTokenNum(total) || !validTokenNum(xp)) return;
+  } else {
+    if (!validTokenNum(p.tokens)) return;
+    total = p.tokens;
+    if (p.xp !== undefined) {
+      if (!validTokenNum(p.xp)) return;
+      xp = p.xp;
+    } else {
+      xp = total; // legacy total-only → Care
+    }
+  }
+  if (total <= 0 && xp <= 0) return;
+  // Invalid/missing project skips Usage only; Care XP still applies below.
+  if (typeof p.project === "string" && p.project && typeof p.agent === "string" && p.agent) {
+    if (hasBreakdown) {
+      usage.recordTokenBreakdown(p.project, p.agent, input, output, cache);
+    } else if (total > 0) {
+      usage.recordTokens(p.project, p.agent, total);
+    }
+    emit("usage-updated");
+  }
+  if (xp > 0) {
+    const slug = savedSlug();
+    if (slug) {
+      care.mutate(slug, (s) => care.feedTokens(s, xp));
+      emit("care-updated");
+      sync.schedulePush();
+    }
+  }
 });
 
 // On launch: pull any cloud progress, then keep pushing in the background.

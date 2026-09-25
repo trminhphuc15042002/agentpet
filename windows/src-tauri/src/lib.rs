@@ -2,6 +2,7 @@ pub mod break_clock;
 pub mod care;
 pub mod cli;
 pub mod hooks;
+pub mod opencode_db;
 pub mod project_pets;
 pub mod server;
 pub mod statemap;

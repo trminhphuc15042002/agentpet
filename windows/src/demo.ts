@@ -35,6 +35,8 @@ function sampleMessage(state: string): string {
 
 const BASE_W = 640, BASE_H = 620, DEMO_W = 1380;
 
+let demoAudioCtx: AudioContext | null = null;
+
 export function initDemo() {
   const panel = document.getElementById("demo-panel") as HTMLElement;
   const toggleBtn = document.getElementById("demo-toggle") as HTMLButtonElement;
@@ -81,16 +83,28 @@ export function initDemo() {
   const active = () => sessions.filter((s) => s.state === "working" || s.state === "waiting");
   const mood = () => (celebrating ? "celebrate" : aggregateMood(sessions));
 
+  function playBuiltin(ev: "done" | "waiting") {
+    try {
+      demoAudioCtx = demoAudioCtx || new AudioContext();
+      const o = demoAudioCtx.createOscillator(); const g = demoAudioCtx.createGain();
+      o.type = "sine"; o.frequency.value = ev === "done" ? 880 : 560;
+      g.gain.value = 0.05; o.connect(g); g.connect(demoAudioCtx.destination);
+      o.start(); o.stop(demoAudioCtx.currentTime + 0.13);
+    } catch {}
+  }
   function playSound(ev: "done" | "waiting") {
     const data = localStorage.getItem(`ap_sound_${ev}_data`);
-    if (data) { try { void new Audio(data).play(); return; } catch {} }
-    try {
-      const ctx = new AudioContext();
-      const o = ctx.createOscillator(); const g = ctx.createGain();
-      o.type = "sine"; o.frequency.value = ev === "done" ? 880 : 560;
-      g.gain.value = 0.05; o.connect(g); g.connect(ctx.destination);
-      o.start(); o.stop(ctx.currentTime + 0.13);
-    } catch {}
+    if (data) {
+      try {
+        const p = new Audio(data).play();
+        if (p !== undefined && typeof (p as Promise<void>).then === "function") {
+          (p as Promise<void>).catch(() => playBuiltin(ev));
+          return;
+        }
+        return;
+      } catch {}
+    }
+    playBuiltin(ev);
   }
 
   /// Deterministic preview line for idle/done/celebrate (first of the pool).

@@ -151,9 +151,15 @@ function renderUsage() {
   const selectedAgent = agentEl.value;
   const filtered = rows.filter((r) => (selectedProject === "all" || r.projectName === selectedProject) && (selectedAgent === "all" || r.agent === selectedAgent));
   const totalTokens = filtered.reduce((sum, r) => sum + r.tokens, 0);
+  const totalInput = filtered.reduce((sum, r) => sum + (r.input || 0), 0);
+  const totalOutput = filtered.reduce((sum, r) => sum + (r.output || 0), 0);
+  const totalCache = filtered.reduce((sum, r) => sum + (r.cache || 0), 0);
   const totalSessions = filtered.reduce((sum, r) => sum + r.sessions, 0);
   const setTxt = (id: string, value: string) => { const el = document.getElementById(id); if (el) el.textContent = value; };
   setTxt("usage-total-tokens", fmtNum(totalTokens));
+  setTxt("usage-total-input", fmtNum(totalInput));
+  setTxt("usage-total-output", fmtNum(totalOutput));
+  setTxt("usage-total-cache", fmtNum(totalCache));
   setTxt("usage-total-sessions", fmtNum(totalSessions));
   setTxt("usage-total-projects", String(new Set(filtered.map((r) => r.projectName)).size));
   setTxt("usage-total-agents", String(new Set(filtered.map((r) => r.agent)).size));
@@ -173,13 +179,22 @@ function renderUsage() {
   const chart = document.getElementById("usage-chart");
   const empty = document.getElementById("usage-empty");
   if (empty) empty.style.display = bucketRows.length ? "none" : "";
-  if (chart) chart.innerHTML = bucketRows.map(([key, bucket]) => `<div class="usage-bar-wrap" title="${fmtNum(bucket.tokens)} tokens"><div class="usage-bar" style="height:${Math.max(3, Math.round(bucket.tokens / maxTokens * 100))}%"></div><div class="usage-bar-label">${esc(labelOf(key))}</div></div>`).join("");
+  if (chart) chart.innerHTML = bucketRows.map(([key, bucket]) => `<div class="usage-bar-wrap" title="${fmtNum(bucket.tokens)} ${esc(t("Tokens"))}"><div class="usage-bar" style="height:${Math.max(3, Math.round(bucket.tokens / maxTokens * 100))}%"></div><div class="usage-bar-label">${esc(labelOf(key))}</div></div>`).join("");
 
-  const grouped = new Map<string, { project: string; agent: string; tokens: number; sessions: number }>();
+  const grouped = new Map<string, {
+    project: string; agent: string;
+    tokens: number; input: number; output: number; cache: number; sessions: number;
+  }>();
   for (const row of filtered) {
     const key = `${row.projectName}|${row.agent}`;
-    const item = grouped.get(key) || { project: row.projectName, agent: row.agent, tokens: 0, sessions: 0 };
+    const item = grouped.get(key) || {
+      project: row.projectName, agent: row.agent,
+      tokens: 0, input: 0, output: 0, cache: 0, sessions: 0,
+    };
     item.tokens += row.tokens;
+    item.input += row.input || 0;
+    item.output += row.output || 0;
+    item.cache += row.cache || 0;
     item.sessions += row.sessions;
     grouped.set(key, item);
   }
@@ -187,7 +202,12 @@ function renderUsage() {
   const body = document.getElementById("usage-table-body");
   const tableEmpty = document.getElementById("usage-table-empty");
   if (tableEmpty) tableEmpty.style.display = tableRows.length ? "none" : "";
-  if (body) body.innerHTML = tableRows.map((row) => `<tr><td>${esc(row.project)}</td><td>${esc(row.agent)}</td><td>${fmtNum(row.tokens)}</td><td>${fmtNum(row.sessions)}</td></tr>`).join("");
+  if (body) body.innerHTML = tableRows.map((row) =>
+    `<tr><td>${esc(row.project)}</td><td>${esc(row.agent)}</td>` +
+    `<td>${fmtNum(row.tokens)}</td><td>${fmtNum(row.input)}</td>` +
+    `<td>${fmtNum(row.output)}</td><td>${fmtNum(row.cache)}</td>` +
+    `<td>${fmtNum(row.sessions)}</td></tr>`
+  ).join("");
 }
 function initUsage() {
   ["usage-period", "usage-project", "usage-agent"].forEach((id) => document.getElementById(id)?.addEventListener("change", renderUsage));
@@ -1054,11 +1074,7 @@ function initAnimations() {
 
 // ----------------------------------------------------------------- sounds ----
 let settingsAudioCtx: AudioContext | null = null;
-function playSound(ev: "done" | "waiting") {
-  const data = localStorage.getItem(`ap_sound_${ev}_data`);
-  if (data) {
-    try { void new Audio(data).play(); return; } catch {}
-  }
+function playBuiltinChime(ev: "done" | "waiting") {
   try {
     settingsAudioCtx = settingsAudioCtx || new AudioContext();
     const o = settingsAudioCtx.createOscillator();
@@ -1071,6 +1087,24 @@ function playSound(ev: "done" | "waiting") {
     o.start();
     o.stop(settingsAudioCtx.currentTime + 0.13);
   } catch {}
+}
+/** Custom sound preview: sync throw + rejected play() → builtin; no double-play. */
+function playSound(ev: "done" | "waiting") {
+  const data = localStorage.getItem(`ap_sound_${ev}_data`);
+  if (data) {
+    try {
+      const a = new Audio(data);
+      const p = a.play();
+      if (p !== undefined && typeof (p as Promise<void>).then === "function") {
+        (p as Promise<void>).catch(() => playBuiltinChime(ev));
+        return;
+      }
+      return;
+    } catch {
+      // fall through to builtin
+    }
+  }
+  playBuiltinChime(ev);
 }
 
 function initSounds() {
@@ -1219,6 +1253,9 @@ function applyStatic() {
   set("t-usage-agent", "Agent");
   set("usage-agent-all", "All agents");
   set("t-usage-tokens", "Tokens");
+  set("t-usage-input", "Input");
+  set("t-usage-output", "Output");
+  set("t-usage-cache", "Cache");
   set("t-usage-sessions", "Sessions");
   set("t-usage-projects", "Projects");
   set("t-usage-agents", "Agents");
@@ -1228,6 +1265,9 @@ function applyStatic() {
   set("t-usage-th-project", "Project");
   set("t-usage-th-agent", "Agent");
   set("t-usage-th-tokens", "Tokens");
+  set("t-usage-th-input", "Input");
+  set("t-usage-th-output", "Output");
+  set("t-usage-th-cache", "Cache");
   set("t-usage-th-sessions", "Sessions");
   set("usage-table-empty", "No matching usage.");
   // bubble
@@ -1348,13 +1388,15 @@ function initLang() {
     applyStatic();
     renderAgents();
     showCurrent();
+    if (document.querySelector('.page[data-page="usage"].sel')) renderUsage();
     invoke("set_lang", { code: getLang() }).catch(() => {});
     await emit("lang-changed", getLang());
   });
 }
 
 function esc(s: string): string {
-  return s.replace(/[&<>]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c] || c));
+  return s.replace(/[&<>"']/g, (c) =>
+    ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c] || c));
 }
 
 // Paint the filled-left part of every slider (drives the --fill CSS variable)

@@ -178,5 +178,58 @@ fn handle_event(app: &AppHandle, body: &str) {
         });
     }
 
+    // OpenCode: fail-open DB delta side path (does not gate state emit).
+    if agent_kind == "opencode" {
+        let app2 = app.clone();
+        let sess = tok_session.clone();
+        let proj = tok_project.clone();
+        std::thread::spawn(move || {
+            let Some(path) = crate::opencode_db::default_db_path() else {
+                return;
+            };
+            if !path.is_file() {
+                return;
+            }
+            let id = crate::opencode_db::normalize_session_id(&sess);
+            if id.is_empty() {
+                return;
+            }
+            // Real ses_… → PK; directory/non-ses fallback → latest row for that dir.
+            // Snapshot key is always the real DB session id, never a path string.
+            let Some(row) = crate::opencode_db::resolve_session_tokens(&path, &id, &proj) else {
+                return;
+            };
+            if row.id.is_empty() || !crate::opencode_db::is_opencode_session_id(&row.id) {
+                return;
+            }
+            let project = if !proj.is_empty() {
+                proj
+            } else {
+                row.directory.clone()
+            };
+            let Some(delta) =
+                crate::opencode_db::snapshots().compute_and_commit(&row.id, row.tokens)
+            else {
+                return;
+            };
+            if delta.total == 0 && delta.xp == 0 {
+                return;
+            }
+            let _ = app2.emit(
+                "agent-tokens",
+                serde_json::json!({
+                    "agent": "opencode",
+                    "session": sess,
+                    "project": project,
+                    "tokens": delta.total,
+                    "xp": delta.xp,
+                    "input": delta.input,
+                    "output": delta.output,
+                    "cache": delta.cache,
+                }),
+            );
+        });
+    }
+
     emit_payload(app, state, None);
 }

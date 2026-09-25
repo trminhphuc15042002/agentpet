@@ -263,7 +263,10 @@ fn opencode_plugin(binary: &str) -> String {
          \x20 }} catch (e) {{}}\n\
          }};\n\n\
          export const AgentPet = async ({{ directory, sessionId }}) => {{\n\
-         \x20 const sid = \"opencode:\" + (sessionId || directory || \"default\");\n\
+         \x20 // Prefer real OpenCode session id; directory only when sessionId absent.\n\
+         \x20 // AgentPet resolves directory → latest ses_… for token snapshots (read-only).\n\
+         \x20 const realSid = (sessionId && String(sessionId).trim()) || \"\";\n\
+         \x20 const sid = \"opencode:\" + (realSid || directory || \"default\");\n\
          \x20 return {{\n\
          \x20   \"session.created\": async () => sendEvent(\"working\", sid, directory),\n\
          \x20   \"session.start\": async () => sendEvent(\"working\", sid, directory),\n\
@@ -292,7 +295,8 @@ mod tests {
         assert!(js.contains("permission.ask"), "Should handle permission.ask event");
         assert!(js.contains("session.created"), "Should handle session.created event");
         assert!(js.contains("session.idle"), "Should handle session.idle event");
-        assert!(js.contains("sessionId || directory"), "Should handle sessionId fallback");
+        assert!(js.contains("realSid || directory"), "Should prefer real sessionId, directory fallback");
+        assert!(js.contains("sessionId && String(sessionId).trim()"), "Should preserve non-empty real session ids");
     }
 }
 

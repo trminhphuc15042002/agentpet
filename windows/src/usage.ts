@@ -14,6 +14,10 @@ export interface UsageRow {
   day: string;
   tokens: number;
   sessions: number;
+  /** Optional; absent on historical rows → treat as 0 in UI. Never infer from tokens. */
+  input?: number;
+  output?: number;
+  cache?: number;
 }
 
 function fnv1a(s: string): string {
@@ -46,23 +50,97 @@ function loadDirty(): Set<string> {
 }
 function saveDirty(d: Set<string>) { localStorage.setItem(DIRTY_KEY, JSON.stringify([...d])); }
 
+function validUsageNum(n: unknown): n is number {
+  return Number.isSafeInteger(n) && (n as number) >= 0;
+}
+
+/** Present optional fields must be safe non-neg ints; only undefined is absent → 0. null/invalid → reject. */
+function optionalUsageField(n: unknown): number | null {
+  if (n === undefined) return 0;
+  return validUsageNum(n) ? n : null;
+}
+
+function isValidUsageRow(r: unknown): r is UsageRow {
+  if (!r || typeof r !== "object") return false;
+  const row = r as Record<string, unknown>;
+  if (
+    typeof row.projectId !== "string" ||
+    typeof row.projectName !== "string" ||
+    typeof row.agent !== "string" ||
+    typeof row.day !== "string"
+  ) return false;
+  if (!validUsageNum(row.tokens) || !validUsageNum(row.sessions)) return false;
+  if (optionalUsageField(row.input) === null || optionalUsageField(row.output) === null || optionalUsageField(row.cache) === null) {
+    return false;
+  }
+  return true;
+}
+
 /** Returns the locally recorded rows, newest first. */
 export function list(): UsageRow[] {
-  return Object.values(load()).sort((a, b) =>
+  return Object.values(load()).filter(isValidUsageRow).sort((a, b) =>
     b.day.localeCompare(a.day) || b.tokens - a.tokens || a.projectName.localeCompare(b.projectName) || a.agent.localeCompare(b.agent),
   );
 }
 
-function record(project: string, agent: string, tokens: number, sessions: number) {
-  if (!project || !agent || (tokens <= 0 && sessions <= 0)) return;
+function record(
+  project: string,
+  agent: string,
+  tokens: number,
+  sessions: number,
+  breakdown?: { input: number; output: number; cache: number },
+) {
+  if (typeof project !== "string" || !project || typeof agent !== "string" || !agent) return;
+  if (!validUsageNum(tokens) || !validUsageNum(sessions)) return;
+  if (breakdown) {
+    if (!validUsageNum(breakdown.input) || !validUsageNum(breakdown.output) || !validUsageNum(breakdown.cache)) return;
+  }
+  if (tokens <= 0 && sessions <= 0 && !(breakdown && (breakdown.input > 0 || breakdown.output > 0 || breakdown.cache > 0))) {
+    return;
+  }
   const { id, name } = projectIdentity(project);
   const day = today();
   const key = id + "|" + agent + "|" + day;
   const store = load();
-  const r = store[key] || { projectId: id, projectName: name, agent, day, tokens: 0, sessions: 0 };
-  r.tokens += tokens;
-  r.sessions += sessions;
-  r.projectName = name;
+  const existing = store[key];
+  const reuse = isValidUsageRow(existing);
+  let baseTokens = 0;
+  let baseSessions = 0;
+  let baseInput = 0;
+  let baseOutput = 0;
+  let baseCache = 0;
+  if (reuse) {
+    baseTokens = existing.tokens;
+    baseSessions = existing.sessions;
+    baseInput = existing.input ?? 0;
+    baseOutput = existing.output ?? 0;
+    baseCache = existing.cache ?? 0;
+  }
+  const nextTokens = baseTokens + tokens;
+  const nextSessions = baseSessions + sessions;
+  if (!validUsageNum(nextTokens) || !validUsageNum(nextSessions)) return;
+  let nextInput: number | undefined;
+  let nextOutput: number | undefined;
+  let nextCache: number | undefined;
+  if (breakdown) {
+    nextInput = baseInput + breakdown.input;
+    nextOutput = baseOutput + breakdown.output;
+    nextCache = baseCache + breakdown.cache;
+    if (!validUsageNum(nextInput) || !validUsageNum(nextOutput) || !validUsageNum(nextCache)) return;
+  }
+  // New writes always seed input/output/cache = 0; invalid existing is replaced, not mutated.
+  const r: UsageRow = reuse
+    ? { ...existing, projectName: name, tokens: nextTokens, sessions: nextSessions }
+    : {
+        projectId: id, projectName: name, agent, day,
+        tokens: nextTokens, sessions: nextSessions,
+        input: 0, output: 0, cache: 0,
+      };
+  if (breakdown) {
+    r.input = nextInput;
+    r.output = nextOutput;
+    r.cache = nextCache;
+  }
   store[key] = r;
   save(store);
   const dirty = loadDirty();
@@ -71,8 +149,25 @@ function record(project: string, agent: string, tokens: number, sessions: number
   schedulePush();
 }
 
-export function recordTokens(project: string, agent: string, tokens: number) { record(project, agent, tokens, 0); }
-export function recordSession(project: string, agent: string) { record(project, agent, 0, 1); }
+export function recordTokens(project: string, agent: string, tokens: number) {
+  record(project, agent, tokens, 0);
+}
+
+/** Phase 1 OpenCode path: total + breakdown; tokens must equal input+output+cache for new writes. */
+export function recordTokenBreakdown(
+  project: string,
+  agent: string,
+  input: number,
+  output: number,
+  cache: number,
+) {
+  const tokens = input + output + cache;
+  record(project, agent, tokens, 0, { input, output, cache });
+}
+
+export function recordSession(project: string, agent: string) {
+  record(project, agent, 0, 1);
+}
 
 let pushTimer: number | undefined;
 export function schedulePush(afterMs = 30_000) {
@@ -87,13 +182,28 @@ export async function push(): Promise<void> {
   const dirty = loadDirty();
   if (!dirty.size) return;
   const store = load();
-  const snapshot = [...dirty].map((k) => store[k]).filter(Boolean) as UsageRow[];
-  if (!snapshot.length) { saveDirty(new Set()); return; }
+  const snapshot: UsageRow[] = [];
+  for (const k of [...dirty]) {
+    const row = store[k];
+    if (isValidUsageRow(row)) snapshot.push(row);
+    else dirty.delete(k);
+  }
+  saveDirty(dirty);
+  if (!snapshot.length) return;
   try {
     const res = await fetch(BASE + "/api/usage/sync", {
       method: "POST",
       headers: { "content-type": "application/json", authorization: "Bearer " + tok },
-      body: JSON.stringify({ rows: snapshot }),
+      body: JSON.stringify({
+        rows: snapshot.map((r) => ({
+          projectId: r.projectId,
+          projectName: r.projectName,
+          agent: r.agent,
+          day: r.day,
+          tokens: r.tokens,
+          sessions: r.sessions,
+        })),
+      }),
     });
     if (res.status === 401) return;
     if (!res.ok) return;
