@@ -26,6 +26,7 @@ pub fn run_hook(args: &[String]) {
             project: flag(args, "--project").unwrap_or_default(),
             message: flag(args, "--message").unwrap_or_default(),
             role: flag(args, "--role").unwrap_or_default(),
+            model: flag(args, "--model").unwrap_or_default(),
             tokens: flag(args, "--tokens").and_then(|s| s.parse().ok()).unwrap_or(0),
             cost: flag(args, "--cost").and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0),
             terminal_program,
@@ -101,6 +102,16 @@ pub fn run_hook(args: &[String]) {
         transcript: first_str(&v, &["transcript_path", "transcriptPath"]).unwrap_or_default(),
         subagent: first_str(&v, &["agent_id", "subagent_id", "agentId"]).unwrap_or_default(),
         role: String::new(),
+        // Claude/Antigravity pass the model in their hook payload; OpenCode uses
+        // the --model flag. `model` may be a string or { displayName }.
+        model: first_str(&v, &["model_name", "modelName", "model"])
+            .or_else(|| {
+                v.get("model")
+                    .and_then(|m| m.get("displayName"))
+                    .and_then(|x| x.as_str())
+                    .map(String::from)
+            })
+            .unwrap_or_default(),
         tokens: 0,
         cost: 0.0,
         terminal_program,
@@ -232,6 +243,8 @@ struct Payload {
     project: String,
     message: String,
     role: String,
+    /// Model in use (OpenCode `session.model.selected`), e.g. "claude-sonnet-4-5".
+    model: String,
     /// Cumulative tokens (input + output) and cost reported by an agent that has
     /// no transcript to read (OpenCode). Zero for the hook-based agents.
     tokens: u64,
@@ -250,7 +263,7 @@ impl Payload {
         serde_json::json!({
             "agent": self.agent, "event": self.event, "session": self.session,
             "project": self.project, "message": self.message, "tool": self.tool,
-            "role": self.role,
+            "role": self.role, "model": self.model,
             "tokens": self.tokens, "cost": self.cost,
             "file": self.file, "desc": self.desc, "transcript": self.transcript,
             "subagent": self.subagent,

@@ -144,7 +144,7 @@ function paint() {
     row.innerHTML =
       `<span class="sess-dot"></span>` +
       `<span class="pop-ameta"><b>${esc(s.project ? basename(s.project) : s.session)}</b>` +
-      `<span class="cap">${esc([s.role, s.cost > 0 ? `$${s.cost.toFixed(2)}` : "", s.title || s.live || t(cap(s.state)), stale ? `${elapsedString(s.updatedAt)} ${t("no update")}` : ""].filter(Boolean).join(" · "))}</span></span>` +
+      `<span class="cap">${esc([s.role, s.model, s.cost > 0 ? `$${s.cost.toFixed(2)}` : "", s.title || s.live || t(cap(s.state)), stale ? `${elapsedString(s.updatedAt)} ${t("no update")}` : ""].filter(Boolean).join(" · "))}</span></span>` +
       (icon ? `<img class="dp-icon" src="${icon}" alt="">` : "") +
       `<span class="sess-time">${timeString(s)}</span>`;
     const x = document.createElement("button");
@@ -236,7 +236,7 @@ function renderNeeds() {
     row.innerHTML =
       `<span class="pop-need-badge">${esc(needLabel(kind))}</span>` +
       `<span class="pop-ameta"><b>${esc(s.project ? basename(s.project) : s.session)}</b>` +
-      `<span class="cap">${esc([s.role, kind === "approval" ? s.pendingApproval?.tool : "", s.title || s.live].filter(Boolean).join(" · "))}</span></span>` +
+      `<span class="cap">${esc([s.role, s.model, kind === "approval" ? s.pendingApproval?.tool : "", s.title || s.live].filter(Boolean).join(" · "))}</span></span>` +
       (icon ? `<img class="dp-icon" src="${icon}" alt="">` : "") +
       `<span class="sess-time">${timeString(s)}</span>`;
     row.onclick = () => {

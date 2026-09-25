@@ -17,6 +17,9 @@ export interface Session {
   /// OpenCode agent/role currently driving the session (build, plan, a forge
   /// subagent like worker-high, ...). Empty for agents that do not report one.
   role: string;
+  /// Model in use (OpenCode `session.model.selected`), e.g. "claude-sonnet-4-5".
+  /// Empty for agents that do not report one.
+  model: string;
   /// Cumulative USD cost reported for this session (OpenCode only), 0 otherwise.
   cost: number;
   tool: string;
@@ -41,6 +44,7 @@ export interface AgentEventPayload {
   event?: string;
   title?: string | null;
   role?: string;
+  model?: string;
   cost?: number;
   ts?: number;
   terminalProgram?: string;
@@ -82,6 +86,7 @@ export class SessionStore {
       live,
       title: e.title ?? prev?.title ?? "",
       role: e.role ?? prev?.role ?? "",
+      model: e.model ?? prev?.model ?? "",
       cost: e.cost ?? prev?.cost ?? 0,
       tool: e.tool ?? "",
       updatedAt: now,

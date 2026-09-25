@@ -292,6 +292,18 @@ function extractSessionID(event) {
   )
 }
 
+function modelName(model) {
+  if (!model) return ""
+  if (typeof model === "string") return model
+  return (
+    getString(model.modelID) ||
+    getString(model.id) ||
+    getString(model.name) ||
+    getString(model.displayName) ||
+    ""
+  )
+}
+
 export default {
   id: "agentpet",
   async setup(ctx) {
@@ -304,6 +316,7 @@ export default {
     const looksLikePath = (s) => s.indexOf("/") >= 0 || s.indexOf("\\") >= 0
     const baseDir = looksLikePath(setupDir) ? setupDir : ""
     const roles = new Map()
+    const models = new Map()
     const dirs = new Map()
     const extractDirectory = (event) => {
       const p = propsOf(event)
@@ -329,6 +342,8 @@ export default {
         const args = ["hook", "--agent", "opencode", "--event", state, "--session", sid, "--project", project]
         const role = roles.get(sid)
         if (role) args.push("--role", role)
+        const model = models.get(sid)
+        if (model) args.push("--model", model)
         if (tokens > 0) args.push("--tokens", String(tokens))
         if (cost > 0) args.push("--cost", String(cost))
         const child = spawn(AGENTPET_BIN, args,
@@ -357,6 +372,9 @@ export default {
             if (type === "session.agent.selected") {
               const role = (propsOf(event).agent) || ""
               if (role) roles.set(sid, role)
+            } else if (type === "session.model.selected") {
+              const name = modelName(propsOf(event).model)
+              if (name) models.set(sid, name)
             } else if (type === "permission.asked" || type === "session.permission.create") {
               send("waiting", sid, 0, 0, event)
             } else if (type === "session.execution.succeeded" ||
