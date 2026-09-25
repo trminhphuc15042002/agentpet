@@ -632,6 +632,23 @@ export class BubbleRenderer {
       badge.textContent = `×${g.count}`;
     }
 
+    // Agent Party T1 stays inside the existing row: no child window, canvas,
+    // or timer. Roles are available in the session store for a later expanded
+    // roster; this compact count is deliberately the low-cost first surface.
+    let party = el.querySelector<HTMLElement>(".party-count");
+    const children = s.subagents?.length ?? 0;
+    if (children > 0) {
+      if (!party) {
+        party = document.createElement("span");
+        party.className = "party-count";
+        el.appendChild(party);
+      }
+      party.textContent = `👥 ${children}`;
+      party.title = `${children} active subagent${children === 1 ? "" : "s"}`;
+    } else {
+      party?.remove();
+    }
+
     this.syncApproval(el, s);
   }
 

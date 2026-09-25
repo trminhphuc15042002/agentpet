@@ -144,10 +144,29 @@ pub fn start(app: AppHandle) {
     }
 
     std::thread::spawn(move || {
-        let server = match tiny_http::Server::http(("127.0.0.1", HOOK_PORT)) {
-            Ok(s) => s,
-            Err(_) => return, // another instance owns the port
+        // A just-replaced Windows build can leave its listener in teardown for a
+        // moment. Previously one failed bind silently disabled all hooks until
+        // the user restarted AgentPet again. Retry only during startup (never a
+        // runtime poll), then still yield if another instance truly owns it.
+        let mut server = None;
+        for attempt in 0..10 {
+            match tiny_http::Server::http(("127.0.0.1", HOOK_PORT)) {
+                Ok(bound) => {
+                    crate::dlog("hook listener bound on 127.0.0.1:47628");
+                    server = Some(bound);
+                    break;
+                }
+                Err(error) if attempt < 9 => {
+                    crate::dlog(&format!("hook listener bind retry {}: {error}", attempt + 1));
+                    std::thread::sleep(std::time::Duration::from_millis(500));
+                }
+                Err(error) => {
+                    crate::dlog(&format!("hook listener unavailable: {error}"));
+                    return;
+                }
+            }
         };
+        let Some(server) = server else { return };
         for mut req in server.incoming_requests() {
             let mut body = String::new();
             let _ = req.as_reader().read_to_string(&mut body);

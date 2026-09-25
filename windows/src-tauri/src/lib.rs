@@ -33,7 +33,7 @@ struct HitRect {
 
 /// Append a line to %APPDATA%/AgentPet/debug.log , lightweight field
 /// diagnostics for the Windows build (no console there).
-fn dlog(msg: &str) {
+pub(crate) fn dlog(msg: &str) {
     if let Some(p) = dirs::config_dir().map(|d| d.join("AgentPet").join("debug.log")) {
         if let Some(dir) = p.parent() {
             let _ = std::fs::create_dir_all(dir);

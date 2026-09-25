@@ -65,6 +65,7 @@ if (IS_MAIN) (async () => {
 
 const canvas = document.getElementById("pet") as HTMLCanvasElement;
 const bubbleEl = document.getElementById("bubble") as HTMLDivElement;
+const partyBadge = document.getElementById("party-badge") as HTMLDivElement;
 const pet = new Pet(canvas);
 const store = new SessionStore();
 const bubble = new BubbleRenderer(bubbleEl);
@@ -176,6 +177,10 @@ function pickMoodLine(mood: string) {
 
 function render() {
   const sessions = store.active().filter((s) => ownsProject(s.project));
+  const subagentCount = sessions.reduce((count, session) => count + session.subagents.length, 0);
+  partyBadge.hidden = subagentCount === 0;
+  partyBadge.textContent = `👥 ${subagentCount}`;
+  partyBadge.title = `${subagentCount} active subagent${subagentCount === 1 ? "" : "s"}`;
   const resolved = aggregateMood(sessions);
 
   if (resolved === "done" && lastResolved !== "done") {
@@ -464,6 +469,10 @@ function reportHitRect() {
   const rects: { left: number; top: number; right: number; bottom: number }[] = [];
   if (!bubbleEl.hidden) {
     const b = bubbleEl.getBoundingClientRect();
+    if (b.width > 0) rects.push({ left: b.left, top: b.top, right: b.right, bottom: b.bottom });
+  }
+  if (!partyBadge.hidden) {
+    const b = partyBadge.getBoundingClientRect();
     if (b.width > 0) rects.push({ left: b.left, top: b.top, right: b.right, bottom: b.bottom });
   }
   const cr = canvas.getBoundingClientRect();

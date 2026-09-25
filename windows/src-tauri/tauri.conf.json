@@ -36,6 +36,9 @@
   },
   "bundle": {
     "active": true,
+    "resources": {
+      "binaries/WebView2Loader.dll": "WebView2Loader.dll"
+    },
     "targets": [
       "nsis",
       "msi"
@@ -58,7 +61,8 @@
           "English",
           "SimpChinese",
           "Vietnamese"
-        ]
+        ],
+        "installerHooks": "installer-hooks.nsh"
       }
     },
     "linux": {
