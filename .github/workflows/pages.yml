@@ -30,6 +30,10 @@ jobs:
         uses: actions/checkout@v4
       - name: Setup Pages
         uses: actions/configure-pages@v5
+        with:
+          # Forks do not have a Pages site until the first deployment. Enable it
+          # here instead of failing the initial configure-pages lookup with 404.
+          enablement: true
       - name: Upload docs artifact
         uses: actions/upload-pages-artifact@v3
         with:
