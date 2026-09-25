@@ -553,14 +553,17 @@ export class BubbleRenderer {
     el.dataset.state = s.state;
     el.classList.toggle("waiting", s.state === "waiting");
 
-    // Click a row to focus the terminal running it (Warp deep-link; see the
-    // focus_terminal Rust command). Only Warp gives a reliable focus on
-    // Windows/Linux, so only warp-backed rows advertise as clickable.
+    // Click a row to open it. An OpenCode session jumps to that session inside
+    // OpenChamber (its `openchamber://session/<id>` deep link); a Warp-backed row
+    // focuses the pane. Rows advertise as clickable when either applies.
+    const openChamber = s.agent === "opencode" && s.session.startsWith("opencode:");
     const canFocus = !!s.terminalFocusUrl;
-    el.classList.toggle("focusable", canFocus);
-    el.onclick = canFocus
-      ? () => { void invoke("focus_terminal", { program: s.terminalProgram, focusUrl: s.terminalFocusUrl }); }
-      : null;
+    el.classList.toggle("focusable", openChamber || canFocus);
+    el.onclick = openChamber
+      ? () => { void invoke("open_session", { sessionId: s.session }); }
+      : canFocus
+        ? () => { void invoke("focus_terminal", { program: s.terminalProgram, focusUrl: s.terminalFocusUrl }); }
+        : null;
 
     const dot = el.querySelector<HTMLElement>(".sdot");
     if (dot) dot.classList.toggle("spin", s.state !== "idle");

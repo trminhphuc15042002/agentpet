@@ -221,6 +221,29 @@ fn focus_terminal(program: String, focus_url: String) {
     let _ = program;
 }
 
+/// A safe OpenCode session id: alphanumerics, `_` and `-` only, so it can never
+/// carry shell metacharacters into `cmd /c start`.
+fn is_safe_opencode_session(id: &str) -> bool {
+    !id.is_empty()
+        && id.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-'))
+}
+
+/// Open an OpenCode session inside OpenChamber using its
+/// `openchamber://session/<id>` deep link. `session_id` is the raw store key
+/// (`opencode:ses_...`) so callers can pass `Session.session` verbatim.
+#[tauri::command]
+fn open_session(session_id: String) {
+    let id = session_id.strip_prefix("opencode:").unwrap_or(session_id.as_str());
+    if !is_safe_opencode_session(id) { return; }
+    let url = format!("openchamber://session/{id}");
+    #[cfg(windows)]
+    { let _ = std::process::Command::new("cmd").args(["/c", "start", "", &url]).spawn(); }
+    #[cfg(target_os = "macos")]
+    { let _ = std::process::Command::new("open").arg(&url).spawn(); }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    { let _ = std::process::Command::new("xdg-open").arg(&url).spawn(); }
+}
+
 /// Deliver the user's Allow/Deny decision for a gated tool call back to the
 /// parked hook request (see server::handle_approval).
 #[tauri::command]
@@ -411,6 +434,7 @@ pub fn run() {
             open_settings,
             open_url,
             focus_terminal,
+            open_session,
             resolve_approval,
             sync_project_windows,
             set_lang,

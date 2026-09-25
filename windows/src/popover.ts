@@ -66,13 +66,23 @@ function paint() {
     const x = document.createElement("button");
     x.className = "sess-x";
     x.textContent = "✕";
-    x.onclick = () => {
+    x.onclick = (ev) => {
+      ev.stopPropagation();
       const key = `${s.agent}:${s.session}`;
       store.removeKey(key);
       emit("session-dismiss", key);
       paint();
     };
     row.appendChild(x);
+    // Clicking the row (not the ✕) opens the session in OpenChamber, then hides
+    // the popover so the user lands straight on it.
+    if (s.agent === "opencode" && s.session.startsWith("opencode:")) {
+      row.classList.add("openable");
+      row.onclick = () => {
+        void invoke("open_session", { sessionId: s.session });
+        void getCurrentWindow().hide();
+      };
+    }
     list.appendChild(row);
   }
 }

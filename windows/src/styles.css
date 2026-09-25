@@ -819,6 +819,8 @@ body.pop {
 .pop-ameta .cap { font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .pop-agent .sess-x { visibility: hidden; }
 .pop-agent:hover .sess-x { visibility: visible; }
+.pop-agent.openable { cursor: pointer; border-radius: 6px; transition: background 0.12s; }
+.pop-agent.openable:hover { background: rgba(127, 127, 127, 0.14); }
 .pop-empty { padding: 4px 14px 10px; }
 #pop-list { overflow-y: auto; max-height: 150px; flex: 0 1 auto; padding-bottom: 6px; }
 .pop-row { display: flex; align-items: center; gap: 9px; padding: 8px 14px; font-size: 13px; cursor: pointer; }
