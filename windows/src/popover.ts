@@ -7,7 +7,7 @@ import { emit, listen } from "@tauri-apps/api/event";
 import { getCurrentWindow, LogicalSize } from "@tauri-apps/api/window";
 import { check } from "@tauri-apps/plugin-updater";
 import { relaunch, exit } from "@tauri-apps/plugin-process";
-import { SessionStore, basename, type AgentEventPayload, type Session } from "./state";
+import { SessionStore, basename, type AgentEventPayload, type Session, type SubagentEventPayload } from "./state";
 import { agentIconUrl } from "./icons";
 import { elapsedString } from "./bubble";
 import { t } from "./i18n";
@@ -307,6 +307,7 @@ window.addEventListener("keydown", (e) => {
 });
 
 listen<AgentEventPayload>("agent-event", (e) => { store.update(e.payload); paintAndFit(); });
+listen<SubagentEventPayload>("agent-subagent", (e) => { store.updateSubagent(e.payload); paintAndFit(); });
 listen<string>("agent-end", (e) => { store.remove(e.payload); paintAndFit(); });
 // The approval gate is broadcast to every window; mirror it here so the
 // "Needs approval" bucket works in the popover too.

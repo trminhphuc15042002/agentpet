@@ -108,6 +108,7 @@ export function initDemo() {
       stateSince: now,
       terminalProgram: "",
       terminalFocusUrl: "",
+      subagents: [],
     });
     after();
     paint();

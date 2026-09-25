@@ -37,7 +37,7 @@ fn spec(kind: &str) -> Option<Spec> {
         "claude" => Spec { style: Style::ClaudeNested, rel_path: &[".claude", "settings.json"],
             events: &["SessionStart", "UserPromptSubmit", "PreToolUse", "Notification", "Stop", "SubagentStop", "SessionEnd"] },
         "codex" => Spec { style: Style::ClaudeNested, rel_path: &[".codex", "hooks.json"],
-            events: &["SessionStart", "UserPromptSubmit", "PreToolUse", "PermissionRequest", "Stop", "SubagentStop"] },
+            events: &["SessionStart", "UserPromptSubmit", "PreToolUse", "PermissionRequest", "Stop", "SubagentStart", "SubagentStop"] },
         "gemini" => Spec { style: Style::ClaudeNested, rel_path: &[".gemini", "settings.json"],
             events: &["SessionStart", "BeforeAgent", "BeforeTool", "AfterTool", "Notification", "AfterAgent", "SessionEnd"] },
         "cursor" => Spec { style: Style::CursorFlat, rel_path: &[".cursor", "hooks.json"],

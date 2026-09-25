@@ -8,6 +8,7 @@ import { t, getLang, setLang, type Lang } from "./i18n";
 import { agentIconUrl, uiIcon } from "./icons";
 import * as audio from "./audio";
 import { LAYOUT_PRESETS, readBubbleConfig, type TokenItem, type BubbleToken } from "./bubble";
+import { personalityID } from "./personality";
 import { initDemo } from "./demo";
 import { slice, type Rect } from "./pet";
 import * as care from "./care";
@@ -706,6 +707,11 @@ function initBubble() {
   phrases.value = savedTheme === "off" ? "chef" : savedTheme; // pre-port "off" → chef
   phrases.onchange = () => { localStorage.setItem("ap_theme_phrases", phrases.value); changed(); };
 
+  // Personality: the pet's voice (phrase pools + how often it speaks up).
+  const personality = document.getElementById("personality") as HTMLSelectElement;
+  personality.value = personalityID();
+  personality.onchange = () => { localStorage.setItem("ap_personality", personality.value); changed(); };
+
   const idle = document.getElementById("idle") as HTMLInputElement;
   idle.checked = localStorage.getItem("ap_idle") !== "0";
   idle.onchange = () => { localStorage.setItem("ap_idle", idle.checked ? "1" : "0"); changed(); };
@@ -1293,6 +1299,9 @@ function applyStatic() {
   set("o-dot-claude", "Claude style");
   set("t-activity", "Activity messages");
   set("t-phrases", "Vocabulary");
+  set("t-personality", "Personality");
+  set("t-pers-voice", "Voice");
+  set("t-pers-foot", "How the pet talks when it speaks up: mood, frequency, and how it celebrates.");
   set("t-messages", "Bubble messages");
   set("t-msg-src", "Messages");
   set("o-ms-system", "System");

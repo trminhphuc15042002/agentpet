@@ -30,6 +30,24 @@ export interface Session {
   terminalFocusUrl: string;
   /// A gated tool call awaiting the user's Allow/Deny, if any.
   pendingApproval?: { id: string; tool: string; summary: string };
+  /// Live child agents inferred from Task/Agent dispatches and confirmed stops.
+  /// This is data plumbing for Agent Party; it does not create a new session or
+  /// affect the aggregate pet mood.
+  subagents: Subagent[];
+}
+
+export interface Subagent {
+  id: string;
+  role: string;
+  startedAt: number;
+}
+
+export interface SubagentEventPayload {
+  action: "start" | "stop";
+  session: string;
+  id: string;
+  role?: string;
+  ts?: number;
 }
 
 export interface AgentEventPayload {
@@ -60,6 +78,9 @@ const STALE_REGISTERED_MS = 90_000;
 
 export class SessionStore {
   private sessions = new Map<string, Session>();
+  // A subagent dispatch can arrive immediately before its parent session's
+  // first working event. Keep it briefly so event ordering never loses it.
+  private pendingSubagents = new Map<string, SubagentEventPayload[]>();
 
   update(e: AgentEventPayload) {
     const key = `${e.agent}:${e.session}`;
@@ -78,7 +99,7 @@ export class SessionStore {
       prev?.live ||
       "";
 
-    this.sessions.set(key, {
+    const next: Session = {
       agent: e.agent,
       session: e.session,
       state: e.state,
@@ -93,10 +114,42 @@ export class SessionStore {
       stateSince: prev && prev.state === e.state ? prev.stateSince : now,
       terminalProgram: e.terminalProgram || prev?.terminalProgram || "",
       terminalFocusUrl: e.terminalFocusUrl || prev?.terminalFocusUrl || "",
-    });
+      subagents: prev?.subagents ?? [],
+    };
+    this.sessions.set(key, next);
+    const pending = this.pendingSubagents.get(e.session);
+    if (pending?.length) {
+      this.pendingSubagents.delete(e.session);
+      for (const child of pending) this.updateSubagent(child);
+    }
+  }
+
+  /// Records an inferred subagent lifecycle event. A few agents only expose a
+  /// completion id, so a stop without an exact id retires the oldest child.
+  /// Bound the roster to avoid unbounded memory for a long-lived session.
+  updateSubagent(e: SubagentEventPayload) {
+    const now = e.ts && e.ts > 0 ? e.ts : Date.now();
+    for (const s of this.sessions.values()) {
+      if (s.session !== e.session) continue;
+      const children = s.subagents ?? (s.subagents = []);
+      if (e.action === "start") {
+        if (children.some((child) => child.id === e.id)) return;
+        children.push({ id: e.id, role: e.role || "Subagent", startedAt: now });
+        if (children.length > 8) children.splice(0, children.length - 8);
+      } else {
+        const exact = children.findIndex((child) => child.id === e.id);
+        children.splice(exact >= 0 ? exact : 0, 1);
+      }
+      return;
+    }
+    const pending = this.pendingSubagents.get(e.session) ?? [];
+    pending.push(e);
+    if (pending.length > 8) pending.splice(0, pending.length - 8);
+    this.pendingSubagents.set(e.session, pending);
   }
 
   remove(session: string) {
+    this.pendingSubagents.delete(session);
     for (const k of [...this.sessions.keys()]) {
       if (k.endsWith(`:${session}`)) this.sessions.delete(k);
     }
@@ -129,6 +182,7 @@ export class SessionStore {
 
   clear() {
     this.sessions.clear();
+    this.pendingSubagents.clear();
   }
 
   /// Drop done/stale sessions; returns the list (highest priority first).
@@ -139,6 +193,7 @@ export class SessionStore {
       if (s.state === "done" && quiet > DONE_LINGER_MS) this.sessions.delete(k);
       else if (s.state === "registered" && quiet > STALE_REGISTERED_MS) this.sessions.delete(k);
       else if ((s.state === "working" || s.state === "waiting") && quiet > STALE_ACTIVE_MS) this.sessions.delete(k);
+      else s.subagents = s.subagents.filter((child) => now - child.startedAt <= STALE_ACTIVE_MS);
     }
     return [...this.sessions.values()].sort(
       (a, b) => (PRIORITY[b.state] ?? 0) - (PRIORITY[a.state] ?? 0) || b.updatedAt - a.updatedAt

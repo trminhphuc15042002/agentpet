@@ -2,7 +2,7 @@ import { listen, emit } from "@tauri-apps/api/event";
 import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { Pet } from "./pet";
-import { SessionStore, aggregateMood, basename, type AgentEventPayload } from "./state";
+import { SessionStore, aggregateMood, basename, type AgentEventPayload, type SubagentEventPayload } from "./state";
 import { BubbleRenderer } from "./bubble";
 import { loadCatalog, savedSlug, saveSlug } from "./catalog";
 import { t, setLang, type Lang } from "./i18n";
@@ -327,6 +327,12 @@ listen<AgentEventPayload>("agent-event", (e) => {
   store.update(e.payload);
   const owned = store.active().filter((s) => ownsProject(s.project)).length;
   flashReactive(reactive.evaluate("sessionCount", owned));
+  render();
+});
+// Agent Party plumbing: lifecycle is a small event alongside the parent
+// session, not another pet window or an independently-polled session.
+listen<SubagentEventPayload>("agent-subagent", (e) => {
+  store.updateSubagent(e.payload);
   render();
 });
 // Approval gate: the daemon parked a gated PreToolUse , show Allow/Deny.

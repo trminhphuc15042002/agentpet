@@ -2,6 +2,8 @@
 // ClaudeActivityFormatter (5 themes, per-tool phrase pools, file-type hints,
 // rotating pick per key). Phrases are intentionally English, like macOS.
 
+import { chatPool } from "./personality";
+
 export type ActivityThemeName = "chef" | "engineer" | "wizard" | "explorer" | "scientist";
 
 interface ThemePools {
@@ -187,8 +189,11 @@ export const IDLE_BOOST = [
   "One clean diff can fix the whole afternoon.",
 ];
 
-/// Default editable lines per mood (port of BubbleMessages.defaultLines).
+/// Default editable lines per mood (port of BubbleMessages.defaultLines). A
+/// non-cozy personality overrides some moods; the rest keep the shipped pools.
 export function defaultLines(mood: string): string[] {
+  const override = chatPool(mood);
+  if (override) return override;
   switch (mood) {
     case "waiting": return PET_CHAT.waiting;
     case "done": return PET_CHAT.done;

@@ -4,6 +4,7 @@
 // rate-limit metric is omitted: it needs OpenUsage data the Tauri app lacks.
 
 import { t } from "./i18n";
+import { reactivePool, cooldownScale } from "./personality";
 import type { Hunger } from "./care";
 
 export type Metric = "dailyTokens" | "sessionCount" | "hunger" | "streak" | "dailyMeals";
@@ -15,23 +16,6 @@ const TH = {
   dailyMeals: { silent: 20, low: 50, mid: 100 },
   cooldown: { sameMetric: 600_000, crossMetric: 30_000 }, // ms
   hungerDailyLimit: 2,
-};
-
-const PHRASES: Record<string, string[]> = {
-  dailyTokensLow: ["Burned quite a few tokens today~", "Eaten a lot of tokens", "Token usage rising"],
-  dailyTokensMid: ["Big appetite mode!", "Great appetite today~", "Tokens going fast"],
-  dailyTokensHigh: ["Token usage off the charts today 🔥", "Token burn is extreme!", "Heavy burn today"],
-  sessionCountLow: ["5 agents running at once~", "Lots of agents at work", "Parallelism is up"],
-  sessionCountHigh: ["Command center mode 😳", "So many sessions!", "Full throttle"],
-  hungerLow: ["A little hungry…", "Hmm… want food", "Tummy rumbling"],
-  hungerMid: ["Haven't been fed in a while 😢", "Hungry…", "Want food…"],
-  hungerHigh: ["Where did you go… 😭", "About to faint from hunger", "So hungry"],
-  streakLow: ["Days in a row! Keep going", "Going strong~", "Keeping it up"],
-  streakMid: ["A whole week straight!", "Such persistence~", "So consistent"],
-  streakHigh: ["Legendary streak!", "Incredible!", "Unstoppable"],
-  dailyMealsLow: ["Lots of sessions today~", "Good productivity", "Got quite a bit done"],
-  dailyMealsMid: ["Fifty sessions! Efficiency beast", "50+!", "Super productive"],
-  dailyMealsHigh: ["Over 100! Not sleeping today?", "100+ sessions!", "Superhuman"],
 };
 
 function utcDayKey(d: Date): string {
@@ -46,9 +30,11 @@ let hungerDayKey = "";
 let hungerDayCount = 0;
 
 function checkCooldown(metric: Metric, now: number): boolean {
+  // A personality scales how often the pet speaks up; thresholds stay fixed.
+  const scale = cooldownScale();
   const last = lastFiredAt[metric];
-  if (last != null && now - last < TH.cooldown.sameMetric) return false;
-  if (lastAnyMetric != null && lastAnyMetric !== metric && now - lastAnyFiredAt < TH.cooldown.crossMetric) {
+  if (last != null && now - last < TH.cooldown.sameMetric * scale) return false;
+  if (lastAnyMetric != null && lastAnyMetric !== metric && now - lastAnyFiredAt < TH.cooldown.crossMetric * scale) {
     return false;
   }
   if (metric === "hunger") {
@@ -68,38 +54,38 @@ function pool(metric: Metric, value: number | Hunger): string[] | null {
     case "dailyTokens": {
       const v = value as number;
       if (v < TH.dailyTokens.silent) return null;
-      if (v < TH.dailyTokens.low) return PHRASES.dailyTokensLow;
-      if (v < TH.dailyTokens.mid) return PHRASES.dailyTokensMid;
-      return PHRASES.dailyTokensHigh;
+      if (v < TH.dailyTokens.low) return reactivePool("dailyTokensLow");
+      if (v < TH.dailyTokens.mid) return reactivePool("dailyTokensMid");
+      return reactivePool("dailyTokensHigh");
     }
     case "sessionCount": {
       const v = value as number;
       if (v < TH.sessionCount.silent) return null;
-      if (v < TH.sessionCount.low) return PHRASES.sessionCountLow;
-      return PHRASES.sessionCountHigh;
+      if (v < TH.sessionCount.low) return reactivePool("sessionCountLow");
+      return reactivePool("sessionCountHigh");
     }
     case "hunger": {
       switch (value as Hunger) {
         case "full": case "satisfied": return null;
-        case "peckish": return PHRASES.hungerLow;
-        case "hungry": return PHRASES.hungerMid;
-        case "starving": return PHRASES.hungerHigh;
+        case "peckish": return reactivePool("hungerLow");
+        case "hungry": return reactivePool("hungerMid");
+        case "starving": return reactivePool("hungerHigh");
       }
       return null;
     }
     case "streak": {
       const v = value as number;
       if (v < TH.streak.silent) return null;
-      if (v < TH.streak.low) return PHRASES.streakLow;
-      if (v < TH.streak.mid) return PHRASES.streakMid;
-      return PHRASES.streakHigh;
+      if (v < TH.streak.low) return reactivePool("streakLow");
+      if (v < TH.streak.mid) return reactivePool("streakMid");
+      return reactivePool("streakHigh");
     }
     case "dailyMeals": {
       const v = value as number;
       if (v < TH.dailyMeals.silent) return null;
-      if (v < TH.dailyMeals.low) return PHRASES.dailyMealsLow;
-      if (v < TH.dailyMeals.mid) return PHRASES.dailyMealsMid;
-      return PHRASES.dailyMealsHigh;
+      if (v < TH.dailyMeals.low) return reactivePool("dailyMealsLow");
+      if (v < TH.dailyMeals.mid) return reactivePool("dailyMealsMid");
+      return reactivePool("dailyMealsHigh");
     }
   }
 }

@@ -186,6 +186,25 @@ fn handle_event(app: &AppHandle, body: &str) {
     let terminal_focus_url = str_of(&v, "terminalFocusUrl").to_string();
     let ts = v.get("ts").and_then(|x| x.as_u64()).unwrap_or(0);
 
+    // Agent Party data path. Most integrations only reveal delegation as a
+    // PreToolUse Task/Agent call; record that as a lightweight child. When an
+    // agent supplies a real SubagentStart/Stop id we prefer it, and the UI
+    // bounds/ages the roster so a missing stop cannot leak memory.
+    let is_dispatch = event == "PreToolUse" && (tool == "Task" || tool == "Agent");
+    if is_dispatch || event == "SubagentStart" || event == "SubagentStop" || event == "subagentStop" {
+        let supplied_id = str_of(&v, "subagent");
+        let id = if supplied_id.is_empty() {
+            format!("inferred-{}", if ts > 0 { ts } else { now_millis() })
+        } else {
+            supplied_id.to_string()
+        };
+        let action = if event == "SubagentStop" || event == "subagentStop" { "stop" } else { "start" };
+        let child_role = if desc.is_empty() { "Subagent" } else { desc.as_str() };
+        let _ = app.emit("agent-subagent", serde_json::json!({
+            "action": action, "session": session, "id": id, "role": child_role, "ts": ts,
+        }));
+    }
+
     // OpenCode has no transcript to mine, so it reports cumulative usage on the
     // event itself. Turn that into the delta the app expects (and de-dupe the
     // duplicate delivery) before any early return drops the event.
