@@ -16,7 +16,7 @@ if (!tag || !tag.startsWith("win-v")) {
 }
 const version = tag.slice("win-v".length);
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
-const base = `https://github.com/ntd4996/agentpet/releases/download/${tag}`;
+const base = `https://github.com/trminhphuc15042002/agentpet/releases/download/${tag}`;
 const portable = `AgentPet-portable-x64.zip`;
 const setup = `AgentPet_${version}_x64-setup.exe`;
 
@@ -47,9 +47,9 @@ const sub = (rel, fn) => {
 };
 const wingetDir = "packaging/winget";
 const setVersion = (s) => s.replace(/^PackageVersion: .*/m, `PackageVersion: ${version}`);
-sub(`${wingetDir}/ntd4996.AgentPet.yaml`, setVersion);
-sub(`${wingetDir}/ntd4996.AgentPet.locale.en-US.yaml`, setVersion);
-sub(`${wingetDir}/ntd4996.AgentPet.installer.yaml`, (s) =>
+sub(`${wingetDir}/trminhphuc15042002.AgentPet.yaml`, setVersion);
+sub(`${wingetDir}/trminhphuc15042002.AgentPet.locale.en-US.yaml`, setVersion);
+sub(`${wingetDir}/trminhphuc15042002.AgentPet.installer.yaml`, (s) =>
   setVersion(s)
     .replace(/InstallerUrl: .*/, `InstallerUrl: ${base}/${setup}`)
     .replace(/InstallerSha256: .*/, `InstallerSha256: ${setupHash.toUpperCase()}`)

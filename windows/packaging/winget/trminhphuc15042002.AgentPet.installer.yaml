@@ -1,4 +1,4 @@
-PackageIdentifier: ntd4996.AgentPet
+PackageIdentifier: trminhphuc15042002.AgentPet
 PackageVersion: 0.1.0
 InstallerType: nullsoft
 Scope: user
@@ -7,7 +7,7 @@ InstallModes:
   - silentWithProgress
 Installers:
   - Architecture: x64
-    InstallerUrl: https://github.com/ntd4996/agentpet/releases/download/win-v0.1.0/AgentPet_0.1.0_x64-setup.exe
+    InstallerUrl: https://github.com/trminhphuc15042002/agentpet/releases/download/win-v0.1.0/AgentPet_0.1.0_x64-setup.exe
     InstallerSha256: 7767CD24C694FB7A04ABF1DBD7DEAC138B04D353337D694CB214939999A56318
 ManifestType: installer
 ManifestVersion: 1.6.0

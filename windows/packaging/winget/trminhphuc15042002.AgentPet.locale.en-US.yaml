@@ -1,12 +1,12 @@
-PackageIdentifier: ntd4996.AgentPet
+PackageIdentifier: trminhphuc15042002.AgentPet
 PackageVersion: 0.1.0
 PackageLocale: en-US
-Publisher: ntd4996
-PublisherUrl: https://github.com/ntd4996
+Publisher: trminhphuc15042002
+PublisherUrl: https://github.com/trminhphuc15042002
 PackageName: AgentPet
-PackageUrl: https://github.com/ntd4996/agentpet
+PackageUrl: https://github.com/trminhphuc15042002/agentpet
 License: MIT
-LicenseUrl: https://github.com/ntd4996/agentpet/blob/main/LICENSE
+LicenseUrl: https://github.com/trminhphuc15042002/agentpet/blob/main/LICENSE
 ShortDescription: A desktop pet that reacts in real time to your AI coding agents.
 Description: AgentPet floats a pixel companion on your desktop that reacts in real time to your AI coding agents (Claude Code, Codex, Gemini CLI, Cursor, GitHub Copilot, and more) via their hook systems.
 Moniker: agentpet

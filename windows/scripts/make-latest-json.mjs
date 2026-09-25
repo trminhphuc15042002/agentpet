@@ -20,7 +20,7 @@ if (!exe || !sig) {
 }
 
 const signature = readFileSync(join(nsisDir, sig), "utf8").trim();
-const url = `https://github.com/ntd4996/agentpet/releases/download/${tag}/${encodeURIComponent(exe)}`;
+const url = `https://github.com/trminhphuc15042002/agentpet/releases/download/${tag}/${encodeURIComponent(exe)}`;
 
 const latest = {
   version,
