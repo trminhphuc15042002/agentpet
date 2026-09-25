@@ -9,7 +9,7 @@ public enum HookStyle: Sendable {
     case cursorFlat
     /// Windsurf `~/.codeium/windsurf/hooks.json`: `{"hooks": {event: [{"command": ...}]}}`.
     case windsurfFlat
-    /// opencode: a JS plugin file dropped in `~/.config/opencode/plugin/`.
+    /// opencode: a V2 JS plugin file dropped in `~/.config/opencode/plugins/`.
     case opencodePlugin
     /// Antigravity `~/.gemini/config/hooks.json`: like claudeNested but the event
     /// map lives under a named hook group instead of a top-level `"hooks"` key:
@@ -63,12 +63,13 @@ public enum AgentHooks {
                 events: ["pre_user_prompt", "post_cascade_response"],
                 settingsPath: home + "/.codeium/windsurf/hooks.json")
         case .opencode:
-            // The JS plugin hardcodes its own session.created/session.idle hooks,
-            // so no event list is registered through the generic installer.
+            // The V2 JS plugin hardcodes its own lifecycle hooks, so no event
+            // list is registered through the generic installer. V2 discovers
+            // plugins from `~/.config/opencode/plugins/`.
             return AgentHookSpec(
                 kind: .opencode, style: .opencodePlugin,
                 events: [],
-                settingsPath: home + "/.config/opencode/plugin/agentpet.js")
+                settingsPath: home + "/.config/opencode/plugins/agentpet.js")
         case .antigravity:
             // Antigravity has no session-start/notification hooks, so we register
             // for the model-call and tool lifecycle plus Stop. PreInvocation fires

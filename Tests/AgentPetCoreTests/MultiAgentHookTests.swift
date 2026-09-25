@@ -115,6 +115,12 @@ final class MultiAgentHookTests: XCTestCase {
 
     func testOpencodePluginContent() {
         let js = HookInstaller.opencodePlugin(binary: "/x/agentpet")
+        // V2 plugin shape: default export with { id, setup }.
+        XCTAssertTrue(js.contains("export default"))
+        XCTAssertTrue(js.contains("id: \"agentpet\""))
+        XCTAssertTrue(js.contains("async setup(ctx)"))
+        XCTAssertTrue(js.contains("ctx.event.subscribe"))
+        XCTAssertTrue(js.contains("ctx.tool.hook"))
         XCTAssertTrue(js.contains("session.idle"))
         XCTAssertTrue(js.contains("session.created"))
         XCTAssertTrue(js.contains("--agent"))

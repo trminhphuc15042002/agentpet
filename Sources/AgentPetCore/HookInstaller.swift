@@ -194,20 +194,76 @@ public enum HookInstaller {
     static func opencodePlugin(binary: String) -> String {
         """
         // AgentPet integration (auto-generated, safe to delete to uninstall).
-        // Reports opencode session lifecycle to AgentPet's menu bar app.
+        // OpenCode V2 plugin: a default-exported definition with { id, setup }.
+        // V1 plugin modules (named exports returning a hooks object) are rejected
+        // by the V2 loader, so this file targets V2 only.
+        import { spawn } from "node:child_process"
+
         const AGENTPET_BIN = \(jsString(binary))
-        export const AgentPet = async ({ directory }) => {
-          const sid = "opencode:" + (directory || "default")
-          const send = (state) => {
-            try {
-              Bun.spawn([AGENTPET_BIN, "hook", "--agent", "opencode",
-                         "--event", state, "--session", sid, "--project", directory || ""])
-            } catch (e) {}
-          }
-          return {
-            "session.created": async () => { send("working") },
-            "session.idle": async () => { send("done") },
-          }
+
+        function getString(value) {
+          return typeof value === "string" && value.length > 0 ? value : ""
+        }
+        function propsOf(event) {
+          return (event && (event.properties || event.data)) || {}
+        }
+        function extractSessionID(event) {
+          const p = propsOf(event)
+          return (
+            getString(p.info && p.info.id) ||
+            getString(p.sessionID) || getString(p.sessionId) || getString(p.session_id) ||
+            getString(p.id) ||
+            getString(event && event.sessionID) || getString(event && event.sessionId) ||
+            getString(event && event.session_id) ||
+            getString(event && event.session && event.session.id) ||
+            getString(event && event.id)
+          )
+        }
+
+        export default {
+          id: "agentpet",
+          async setup(ctx) {
+            const dir = (ctx && ctx.location && ctx.location.directory) || ""
+            const send = (state, sid) => {
+              try {
+                const child = spawn(AGENTPET_BIN,
+                  ["hook", "--agent", "opencode", "--event", state, "--session", sid, "--project", dir],
+                  { stdio: "ignore", detached: true, windowsHide: true })
+                child.on("error", () => {})
+                if (child.unref) child.unref()
+              } catch (e) {}
+            }
+            const sidFor = (event) => "opencode:" + (extractSessionID(event) || dir || "default")
+
+            if (ctx && ctx.tool && ctx.tool.hook) {
+              await ctx.tool.hook("execute.before", (event) => send("working", sidFor(event)))
+            }
+
+            if (ctx && ctx.event && ctx.event.subscribe) {
+              const controller = new AbortController()
+              void (async () => {
+                try {
+                  for await (const event of ctx.event.subscribe({ signal: controller.signal })) {
+                    const type = (event && event.type) || ""
+                    const sid = sidFor(event)
+                    if (type === "session.status") {
+                      // idle => done, anything else (busy/retry) => working.
+                      const status = propsOf(event).status
+                      send(status && status.type === "idle" ? "done" : "working", sid)
+                    } else if (type === "session.created" || type === "session.updated") {
+                      send("working", sid)
+                    } else if (type === "permission.asked" || type === "question.asked") {
+                      send("waiting", sid)
+                    } else if (type === "session.idle" || type === "session.deleted" ||
+                               type === "session.compacted" || type === "session.error") {
+                      send("done", sid)
+                    }
+                  }
+                } catch (e) {}
+              })()
+              return () => controller.abort()
+            }
+          },
         }
         """
     }
