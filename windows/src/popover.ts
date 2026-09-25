@@ -56,7 +56,6 @@ function renderCare() {
   const toNext = care.tokensToNextLevel(s);
   setTxt("pop-care-tonext", toNext > 0 ? `≈ ${fmtNum(toNext)} ${t("tokens to next level")}` : "");
   setTxt("pop-care-today", fmtNum(s.tokensToday));
-  setTxt("pop-care-today-sub", `${s.mealsToday} ${t("sessions")}`);
   setTxt("pop-care-streak", String(s.streakDays));
   setTxt("pop-care-lifetime", fmtNum(s.totalTokens));
   setTxt("pop-care-sessions", String(s.totalMeals));
@@ -96,9 +95,6 @@ function applyStatic() {
   set("t-pop-care-streak", "Streak");
   set("t-pop-care-lifetime", "Lifetime");
   set("t-pop-care-sessions", "Sessions");
-  set("pop-care-streak-sub", "days fed");
-  set("pop-care-lifetime-sub", "tokens eaten");
-  set("pop-care-sessions-sub", "completed");
   set("t-pop-care-ach", "Achievements");
   set("t-pop-care-burn", "Burn, last 7 days");
   syncCareMore();
@@ -252,7 +248,7 @@ let lastH = 0;
 function fitWindow() {
   const card = document.querySelector(".pop-card") as HTMLElement;
   if (!card) return;
-  const h = Math.min(560, Math.max(220, card.scrollHeight + 20));
+  const h = Math.min(520, Math.max(220, card.scrollHeight + 20));
   if (Math.abs(h - lastH) < 2) return;
   lastH = h;
   getCurrentWindow().setSize(new LogicalSize(300, h)).catch(() => {});

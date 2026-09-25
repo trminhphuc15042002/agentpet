@@ -879,12 +879,16 @@ body.pop {
 .care-badges { display: flex; flex-wrap: wrap; gap: 6px; }
 .care-badge { font-size: 15px; line-height: 1; opacity: .25; filter: grayscale(1); transition: opacity .2s; }
 .care-badge.on { opacity: 1; filter: none; }
-/* Compact variant used inside the popover (300px wide, no rename). */
-.pop-care { gap: 8px; }
+/* Compact variant used inside the popover (300px wide, no rename). Padded to
+   line up with the .pop-head / .pop-agent rows (14px) instead of touching the
+   card edges, which is what made the first version look broken. */
+.pop-care { gap: 8px; padding: 12px 14px 4px; }
 .pop-care .care-name { cursor: default; font-size: 15px; }
-.pop-care .care-stat { padding: 8px 10px; }
-.pop-care .cs-val { font-size: 17px; }
-.pop-care #pop-care-more { align-self: flex-start; }
+.pop-care .care-quick { display: grid; grid-template-columns: repeat(4, 1fr); gap: 6px; }
+.pop-care .cq { background: rgba(127,127,127,.10); border-radius: 8px; padding: 6px 4px; text-align: center; min-width: 0; }
+.pop-care .cq b { display: block; font-size: 14px; font-weight: 700; line-height: 1.15; }
+.pop-care .cq span { display: block; font-size: 8.5px; text-transform: uppercase; letter-spacing: .03em; opacity: .55; margin-top: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.pop-care .pop-more { font-size: 11px; opacity: .7; padding: 0; }
 .pop-care #pop-care-details { display: flex; flex-direction: column; gap: 8px; }
 .pop-care #pop-care-details[hidden] { display: none; }
 .history-list { display: flex; flex-direction: column; gap: 2px; max-height: 420px; overflow: auto; }

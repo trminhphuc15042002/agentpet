@@ -411,15 +411,18 @@ fn show_popover(app: &tauri::AppHandle) {
         if let Ok(Some(mon)) = app.monitor_from_point(cur.x, cur.y) {
             let mp = mon.position();
             let ms = mon.size();
-            if y < mp.y as f64 {
-                y = cur.y + 12.0; // no room above , drop below
-            }
+            // Keep the popover above the cursor and clamp to the monitor top.
+            // Dropping below the cursor used to land it on the pet, which is an
+            // always-on-top window and drew over the card.
             x = x.max(mp.x as f64).min(mp.x as f64 + ms.width as f64 - w);
             y = y.max(mp.y as f64).min(mp.y as f64 + ms.height as f64 - h);
         }
         let _ = win.set_position(PhysicalPosition::new(x, y));
     }
     let _ = win.show();
+    // Re-assert topmost on every show so the card sits above the always-on-top
+    // pet window (creation-time topmost is lost once the pet is re-shown).
+    let _ = win.set_always_on_top(true);
     let _ = win.set_focus();
     let _ = win.emit("popover-shown", ());
 }

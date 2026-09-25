@@ -295,11 +295,38 @@ function extractSessionID(event) {
 export default {
   id: "agentpet",
   async setup(ctx) {
-    const dir = (ctx && ctx.location && ctx.location.directory) || ""
+    // `ctx.location.directory` is the process cwd captured once per plugin
+    // instance, so a session opened in another project was labelled with the
+    // server's directory (e.g. "rutting-laser"). Prefer the directory carried
+    // by each event's session info, remember it per session, and only fall back
+    // to the setup value when it looks like a real path.
+    const setupDir = (ctx && ctx.location && ctx.location.directory) || ""
+    const looksLikePath = (s) => s.indexOf("/") >= 0 || s.indexOf("\\") >= 0
+    const baseDir = looksLikePath(setupDir) ? setupDir : ""
     const roles = new Map()
-    const send = (state, sid, tokens, cost) => {
+    const dirs = new Map()
+    const extractDirectory = (event) => {
+      const p = propsOf(event)
+      const info = p.info || {}
+      return (
+        getString(info.location && info.location.directory) ||
+        getString(info.directory) ||
+        getString(p.location && p.location.directory) ||
+        getString(p.directory) ||
+        getString(p.cwd) ||
+        getString(event && event.location && event.location.directory) ||
+        getString(event && event.directory)
+      )
+    }
+    const projectFor = (event, sid) => {
+      const found = extractDirectory(event)
+      if (found) dirs.set(sid, found)
+      return dirs.get(sid) || found || baseDir
+    }
+    const send = (state, sid, tokens, cost, event) => {
       try {
-        const args = ["hook", "--agent", "opencode", "--event", state, "--session", sid, "--project", dir]
+        const project = projectFor(event, sid)
+        const args = ["hook", "--agent", "opencode", "--event", state, "--session", sid, "--project", project]
         const role = roles.get(sid)
         if (role) args.push("--role", role)
         if (tokens > 0) args.push("--tokens", String(tokens))
@@ -310,10 +337,10 @@ export default {
         if (child.unref) child.unref()
       } catch (e) {}
     }
-    const sidFor = (event) => "opencode:" + (extractSessionID(event) || dir || "default")
+    const sidFor = (event) => "opencode:" + (extractSessionID(event) || baseDir || "default")
 
     if (ctx && ctx.tool && ctx.tool.hook) {
-      await ctx.tool.hook("execute.before", (event) => send("working", sidFor(event)))
+      await ctx.tool.hook("execute.before", (event) => send("working", sidFor(event), 0, 0, event))
     }
 
     if (ctx && ctx.event && ctx.event.subscribe) {
@@ -331,16 +358,16 @@ export default {
               const role = (propsOf(event).agent) || ""
               if (role) roles.set(sid, role)
             } else if (type === "permission.asked" || type === "session.permission.create") {
-              send("waiting", sid)
+              send("waiting", sid, 0, 0, event)
             } else if (type === "session.execution.succeeded" ||
                        type === "session.execution.failed" ||
                        type === "session.execution.interrupted" ||
                        type === "session.deleted") {
-              send("done", sid)
+              send("done", sid, 0, 0, event)
             } else if (type === "session.execution.started" ||
                        type === "session.tool.called" ||
                        type === "session.tool.input.started") {
-              send("working", sid)
+              send("working", sid, 0, 0, event)
             } else if (type === "session.usage.updated") {
               // Cumulative usage; the server turns it into a delta and de-dupes.
               // Pet XP counts input + output, not cache-read.
@@ -348,7 +375,7 @@ export default {
               const t = p.tokens || {}
               const total = (t.input || 0) + (t.output || 0)
               const cost = typeof p.cost === "number" ? p.cost : 0
-              if (total > 0 || cost > 0) send("usage", sid, total, cost)
+              if (total > 0 || cost > 0) send("usage", sid, total, cost, event)
             }
           }
         } catch (e) {}
