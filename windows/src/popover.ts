@@ -60,7 +60,7 @@ function paint() {
     row.innerHTML =
       `<span class="sess-dot"></span>` +
       `<span class="pop-ameta"><b>${esc(s.project ? basename(s.project) : s.session)}</b>` +
-      `<span class="cap">${esc([s.role, s.title || s.live || t(cap(s.state))].filter(Boolean).join(" · "))}</span></span>` +
+      `<span class="cap">${esc([s.role, s.cost > 0 ? `$${s.cost.toFixed(2)}` : "", s.title || s.live || t(cap(s.state))].filter(Boolean).join(" · "))}</span></span>` +
       (icon ? `<img class="dp-icon" src="${icon}" alt="">` : "") +
       `<span class="sess-time">${timeString(s)}</span>`;
     const x = document.createElement("button");

@@ -297,11 +297,13 @@ export default {
   async setup(ctx) {
     const dir = (ctx && ctx.location && ctx.location.directory) || ""
     const roles = new Map()
-    const send = (state, sid) => {
+    const send = (state, sid, tokens, cost) => {
       try {
         const args = ["hook", "--agent", "opencode", "--event", state, "--session", sid, "--project", dir]
         const role = roles.get(sid)
         if (role) args.push("--role", role)
+        if (tokens > 0) args.push("--tokens", String(tokens))
+        if (cost > 0) args.push("--cost", String(cost))
         const child = spawn(AGENTPET_BIN, args,
           { stdio: "ignore", detached: true, windowsHide: true })
         child.on("error", () => {})
@@ -339,6 +341,14 @@ export default {
                        type === "session.tool.called" ||
                        type === "session.tool.input.started") {
               send("working", sid)
+            } else if (type === "session.usage.updated") {
+              // Cumulative usage; the server turns it into a delta and de-dupes.
+              // Pet XP counts input + output, not cache-read.
+              const p = propsOf(event)
+              const t = p.tokens || {}
+              const total = (t.input || 0) + (t.output || 0)
+              const cost = typeof p.cost === "number" ? p.cost : 0
+              if (total > 0 || cost > 0) send("usage", sid, total, cost)
             }
           }
         } catch (e) {}

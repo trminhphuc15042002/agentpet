@@ -35,6 +35,27 @@ pub fn resolve_approval(id: &str, decision: &str) {
     }
 }
 
+/// Per-session OpenCode usage: the last cumulative (tokens, cost) we saw.
+/// OpenCode reports running totals via `session.usage.updated`, the app wants
+/// deltas, and every event is delivered more than once , so we keep the last
+/// value and hand back only the increase (duplicates become a 0 delta).
+fn usage_map() -> &'static Mutex<HashMap<String, (u64, f64)>> {
+    static U: OnceLock<Mutex<HashMap<String, (u64, f64)>>> = OnceLock::new();
+    U.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn usage_delta(session: &str, tokens: u64, cost: f64) -> (u64, f64) {
+    let Ok(mut m) = usage_map().lock() else { return (0, 0.0) };
+    let prev = m.get(session).copied().unwrap_or((0, 0.0));
+    m.insert(session.to_string(), (tokens.max(prev.0), cost.max(prev.1)));
+    (tokens.saturating_sub(prev.0), (cost - prev.1).max(0.0))
+}
+
+/// Latest cumulative cost for a session, for display on the bubble/popover.
+fn usage_cost(session: &str) -> f64 {
+    usage_map().lock().ok().and_then(|m| m.get(session).map(|v| v.1)).unwrap_or(0.0)
+}
+
 /// Opt-in whitelist: the gate stays OFF unless `~/.agentpet/approval-gate.json`
 /// exists with `{"tools":["Bash",...]}`. Same config path as the macOS app.
 pub fn gated_tools() -> HashSet<String> {
@@ -164,6 +185,21 @@ fn handle_event(app: &AppHandle, body: &str) {
     let terminal_focus_url = str_of(&v, "terminalFocusUrl").to_string();
     let ts = v.get("ts").and_then(|x| x.as_u64()).unwrap_or(0);
 
+    // OpenCode has no transcript to mine, so it reports cumulative usage on the
+    // event itself. Turn that into the delta the app expects (and de-dupe the
+    // duplicate delivery) before any early return drops the event.
+    let tokens_cum = v.get("tokens").and_then(|x| x.as_u64()).unwrap_or(0);
+    let cost_cum = v.get("cost").and_then(|x| x.as_f64()).unwrap_or(0.0);
+    if tokens_cum > 0 || cost_cum > 0.0 {
+        let (dt, dc) = usage_delta(&session, tokens_cum, cost_cum);
+        if dt > 0 || dc > 0.0 {
+            let _ = app.emit("agent-tokens", serde_json::json!({
+                "agent": agent, "session": session, "project": project,
+                "tokens": dt, "cost": dc,
+            }));
+        }
+    }
+
     if crate::statemap::is_session_end(&agent, &event) {
         let _ = app.emit("agent-end", session);
         return;
@@ -226,6 +262,7 @@ fn handle_event(app: &AppHandle, body: &str) {
             "message": message, "tool": tool, "file": file, "desc": desc,
             "role": role,
             "event": event, "title": title, "ts": ts,
+            "cost": usage_cost(&session),
             "terminalProgram": terminal_program, "terminalFocusUrl": terminal_focus_url,
         });
         let _ = app.emit("agent-event", payload);

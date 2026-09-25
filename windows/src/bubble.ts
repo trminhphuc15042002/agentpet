@@ -607,10 +607,12 @@ export class BubbleRenderer {
     const project = el.querySelector<HTMLElement>(".rproject");
     if (project) {
       const base = s.project ? basename(s.project) : s.session;
-      // OpenCode reports the driving agent/role (build, plan, or a forge
-      // subagent like worker-high); surface it beside the project so subagent
-      // work is visible at a glance.
-      project.textContent = s.role ? `${base} · ${s.role}` : base;
+      // Surface the driving agent/role (OpenCode) and, when it reports one, the
+      // running cost, so subagent work and spend are visible at a glance.
+      const parts = [base];
+      if (s.role) parts.push(s.role);
+      if (s.cost > 0) parts.push(`$${s.cost.toFixed(2)}`);
+      project.textContent = parts.join(" · ");
     }
 
     row.anim.set(messageFor(s), s.state !== "done");

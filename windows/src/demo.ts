@@ -111,6 +111,7 @@ export function initDemo() {
       project: SAMPLE_PROJECT[kind] + (n > 1 ? ` #${n}` : ""),
       title: SAMPLE_TITLE[kind] ?? "",
       role: "",
+      cost: 0,
       live: sampleMessage(state),
       tool: "",
       updatedAt: now,

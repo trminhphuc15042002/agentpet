@@ -26,6 +26,8 @@ pub fn run_hook(args: &[String]) {
             project: flag(args, "--project").unwrap_or_default(),
             message: flag(args, "--message").unwrap_or_default(),
             role: flag(args, "--role").unwrap_or_default(),
+            tokens: flag(args, "--tokens").and_then(|s| s.parse().ok()).unwrap_or(0),
+            cost: flag(args, "--cost").and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0),
             terminal_program,
             terminal_focus_url,
             ..Payload::default()
@@ -99,6 +101,8 @@ pub fn run_hook(args: &[String]) {
         transcript: first_str(&v, &["transcript_path", "transcriptPath"]).unwrap_or_default(),
         subagent: first_str(&v, &["agent_id", "subagent_id", "agentId"]).unwrap_or_default(),
         role: String::new(),
+        tokens: 0,
+        cost: 0.0,
         terminal_program,
         terminal_focus_url,
     };
@@ -228,6 +232,10 @@ struct Payload {
     project: String,
     message: String,
     role: String,
+    /// Cumulative tokens (input + output) and cost reported by an agent that has
+    /// no transcript to read (OpenCode). Zero for the hook-based agents.
+    tokens: u64,
+    cost: f64,
     tool: String,
     file: String,
     desc: String,
@@ -243,6 +251,7 @@ impl Payload {
             "agent": self.agent, "event": self.event, "session": self.session,
             "project": self.project, "message": self.message, "tool": self.tool,
             "role": self.role,
+            "tokens": self.tokens, "cost": self.cost,
             "file": self.file, "desc": self.desc, "transcript": self.transcript,
             "subagent": self.subagent,
             "terminalProgram": self.terminal_program, "terminalFocusUrl": self.terminal_focus_url,
