@@ -17,6 +17,33 @@
 
       <div class="pop-divider"></div>
 
+      <div class="care-hud pop-care">
+        <div class="care-top">
+          <div class="care-id">
+            <div class="care-name" id="pop-care-name">—</div>
+            <div class="care-stage"><b id="pop-care-level">Lv 0</b> · <span id="pop-care-stage">Hatchling</span></div>
+          </div>
+          <div class="care-hunger" id="pop-care-hunger">—</div>
+        </div>
+        <div class="care-bar"><div class="care-bar-fill" id="pop-care-xpfill"></div></div>
+        <div class="care-xprow"><span id="pop-care-xp">0 XP</span><span id="pop-care-tonext" class="dim"></span></div>
+        <div class="care-grid">
+          <div class="care-stat"><div class="cs-label" id="t-pop-care-today">Today</div><div class="cs-val" id="pop-care-today">0</div><div class="cs-sub" id="pop-care-today-sub">0 sessions</div></div>
+          <div class="care-stat"><div class="cs-label" id="t-pop-care-streak">Streak</div><div class="cs-val" id="pop-care-streak">0</div><div class="cs-sub" id="t-pop-care-streak-sub">days fed</div></div>
+          <div class="care-stat"><div class="cs-label" id="t-pop-care-lifetime">Lifetime</div><div class="cs-val" id="pop-care-lifetime">0</div><div class="cs-sub" id="t-pop-care-lifetime-sub">tokens eaten</div></div>
+          <div class="care-stat"><div class="cs-label" id="t-pop-care-sessions">Sessions</div><div class="cs-val" id="pop-care-sessions">0</div><div class="cs-sub" id="t-pop-care-sessions-sub">completed</div></div>
+        </div>
+        <button class="linklike" id="pop-care-more">Details ▾</button>
+        <div id="pop-care-details" hidden>
+          <div class="care-achhead"><span id="t-pop-care-ach">Achievements</span><span id="pop-care-achcount" class="dim"></span></div>
+          <div class="care-badges" id="pop-care-badges"></div>
+          <div class="care-charthead"><span id="t-pop-care-burn">Burn, last 7 days</span><span id="pop-care-burntotal" class="dim"></span></div>
+          <div class="care-chart" id="pop-care-chart"></div>
+        </div>
+      </div>
+
+      <div class="pop-divider"></div>
+
       <div class="pop-sec">
         <span class="pop-sec-label" id="t-pop-agents">AGENTS</span>
         <button class="linklike" id="pop-clear" style="display:none">Clear all</button>

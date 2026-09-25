@@ -879,6 +879,14 @@ body.pop {
 .care-badges { display: flex; flex-wrap: wrap; gap: 6px; }
 .care-badge { font-size: 15px; line-height: 1; opacity: .25; filter: grayscale(1); transition: opacity .2s; }
 .care-badge.on { opacity: 1; filter: none; }
+/* Compact variant used inside the popover (300px wide, no rename). */
+.pop-care { gap: 8px; }
+.pop-care .care-name { cursor: default; font-size: 15px; }
+.pop-care .care-stat { padding: 8px 10px; }
+.pop-care .cs-val { font-size: 17px; }
+.pop-care #pop-care-more { align-self: flex-start; }
+.pop-care #pop-care-details { display: flex; flex-direction: column; gap: 8px; }
+.pop-care #pop-care-details[hidden] { display: none; }
 .history-list { display: flex; flex-direction: column; gap: 2px; max-height: 420px; overflow: auto; }
 .hist-day { font-size: 10px; text-transform: uppercase; letter-spacing: .04em; opacity: .5; margin: 10px 0 4px; }
 .hist-row { display: flex; align-items: baseline; gap: 8px; padding: 5px 8px; border-radius: 8px; }

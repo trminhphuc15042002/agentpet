@@ -11,6 +11,8 @@ import { SessionStore, basename, type AgentEventPayload, type Session } from "./
 import { agentIconUrl } from "./icons";
 import { elapsedString } from "./bubble";
 import { t } from "./i18n";
+import * as care from "./care";
+import { savedSlug, petDisplayName, getLibrary } from "./catalog";
 
 const store = new SessionStore();
 const list = document.getElementById("pop-list")!;
@@ -22,8 +24,84 @@ function esc(s: string): string {
   return s.replace(/[&<>]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c] || c));
 }
 
+/// Compact tamagotchi HUD (same engine + copy as the Settings Care tab), so the
+/// pet's level/progress is visible without opening Settings.
+function fmtNum(n: number): string {
+  n = Number(n) || 0;
+  if (n >= 1e9) return (n / 1e9).toFixed(1).replace(/\.0$/, "") + "B";
+  if (n >= 1e6) return (n / 1e6).toFixed(1).replace(/\.0$/, "") + "M";
+  if (n >= 1e3) return (n / 1e3).toFixed(1).replace(/\.0$/, "") + "K";
+  return String(n);
+}
+
+function petName(slug: string): string {
+  const custom = petDisplayName(slug);
+  if (custom !== slug) return custom;
+  return getLibrary().find((p) => p.slug === slug)?.name || slug;
+}
+
+function renderCare() {
+  const slug = savedSlug();
+  if (!slug) return;
+  const s = care.stateFor(slug);
+  const internal = care.levelForXP(s.xp);
+  const setTxt = (id: string, v: string) => { const el = document.getElementById(id); if (el) el.textContent = v; };
+  setTxt("pop-care-name", petName(slug));
+  setTxt("pop-care-level", `${t("Lv")} ${care.displayLevel(s.xp)}`);
+  setTxt("pop-care-stage", t(care.stageName(internal)));
+  setTxt("pop-care-hunger", t(care.hunger(s)));
+  const fill = document.getElementById("pop-care-xpfill");
+  if (fill) fill.style.width = `${Math.round(care.levelProgress(s.xp) * 100)}%`;
+  setTxt("pop-care-xp", `${s.xp} XP`);
+  const toNext = care.tokensToNextLevel(s);
+  setTxt("pop-care-tonext", toNext > 0 ? `≈ ${fmtNum(toNext)} ${t("tokens to next level")}` : "");
+  setTxt("pop-care-today", fmtNum(s.tokensToday));
+  setTxt("pop-care-today-sub", `${s.mealsToday} ${t("sessions")}`);
+  setTxt("pop-care-streak", String(s.streakDays));
+  setTxt("pop-care-lifetime", fmtNum(s.totalTokens));
+  setTxt("pop-care-sessions", String(s.totalMeals));
+  // Details: achievements + 7-day burn (kept collapsed to keep the popover short).
+  const unlocked = new Set(s.unlockedAchievements || []);
+  setTxt("pop-care-achcount", `${unlocked.size} / ${care.ACHIEVEMENTS.length}`);
+  const badges = document.getElementById("pop-care-badges");
+  if (badges) badges.innerHTML = care.ACHIEVEMENTS
+    .map((a) => `<span class="care-badge${unlocked.has(a) ? " on" : ""}" title="${t(care.ACH_NAME[a])}">${care.ACH_ICON[a]}</span>`)
+    .join("");
+  const days = care.recentDays(s, 7);
+  const max = Math.max(1, ...days.map((d) => d.tokens));
+  setTxt("pop-care-burntotal", fmtNum(days.reduce((a, d) => a + d.tokens, 0)));
+  const chart = document.getElementById("pop-care-chart");
+  if (chart) chart.innerHTML = days
+    .map((d) => `<div class="cbar-wrap" title="${fmtNum(d.tokens)}"><div class="cbar" style="height:${Math.max(3, Math.round((d.tokens / max) * 100))}%"></div><div class="cbar-lbl">${d.label}</div></div>`)
+    .join("");
+}
+
+// Details toggle (achievements + burn chart), remembered across opens.
+const careMore = document.getElementById("pop-care-more") as HTMLButtonElement;
+const careDetails = document.getElementById("pop-care-details") as HTMLElement;
+function syncCareMore() {
+  const open = localStorage.getItem("ap_pop_care_details") === "1";
+  careDetails.hidden = !open;
+  careMore.textContent = `${t("Details")} ${open ? "▴" : "▾"}`;
+}
+careMore.onclick = () => {
+  localStorage.setItem("ap_pop_care_details", careDetails.hidden ? "1" : "0");
+  syncCareMore();
+  fitWindow();
+};
+
 function applyStatic() {
   const set = (id: string, key: string) => { const el = document.getElementById(id); if (el) el.textContent = t(key); };
+  set("t-pop-care-today", "Today");
+  set("t-pop-care-streak", "Streak");
+  set("t-pop-care-lifetime", "Lifetime");
+  set("t-pop-care-sessions", "Sessions");
+  set("pop-care-streak-sub", "days fed");
+  set("pop-care-lifetime-sub", "tokens eaten");
+  set("pop-care-sessions-sub", "completed");
+  set("t-pop-care-ach", "Achievements");
+  set("t-pop-care-burn", "Burn, last 7 days");
+  syncCareMore();
   set("t-pop-agents", "AGENTS");
   set("pop-clear", "Clear all");
   set("pop-empty", "Nothing running right now.");
@@ -181,8 +259,9 @@ function fitWindow() {
 }
 
 const origPaint = paint;
-function paintAndFit() { origPaint(); fitWindow(); }
+function paintAndFit() { origPaint(); renderCare(); fitWindow(); }
 
+listen("care-updated", () => paintAndFit());
 setInterval(paintAndFit, 1000); // live elapsed + prune
 applyStatic();
 paintAndFit();
