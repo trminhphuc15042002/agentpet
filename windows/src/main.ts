@@ -13,6 +13,7 @@ import * as usage from "./usage";
 import * as history from "./history";
 import * as reactive from "./reactive";
 import * as projectpets from "./projectpets";
+import * as audio from "./audio";
 
 // Which project THIS pet window represents. `null` = the main window (the
 // default single pet). Split-pet spawns extra windows with `?project=<id>`.
@@ -104,32 +105,10 @@ function applyPet() {
 }
 applyPet();
 
-// Simple synthesized chimes (no audio assets needed). Per-event enable, like
-// the macOS SoundSettings (done = high glass-ish, waiting = lower submarine).
-let audioCtx: AudioContext | null = null;
-function chime(event: "done" | "waiting") {
-  const key = event === "done" ? "ap_sound_done" : "ap_sound_waiting";
-  const legacy = localStorage.getItem("ap_sound"); // pre-split toggle
-  const enabled = localStorage.getItem(key) ?? (legacy === "0" ? "0" : "1");
-  if (enabled === "0") return;
-  // Custom uploaded sound wins (mac SoundSettings custom file).
-  const data = localStorage.getItem(`ap_sound_${event}_data`);
-  if (data) {
-    try { void new Audio(data).play(); return; } catch {}
-  }
-  try {
-    audioCtx = audioCtx || new AudioContext();
-    const o = audioCtx.createOscillator();
-    const g = audioCtx.createGain();
-    o.type = "sine";
-    o.frequency.value = event === "done" ? 880 : 560;
-    g.gain.value = 0.05;
-    o.connect(g);
-    g.connect(audioCtx.destination);
-    o.start();
-    o.stop(audioCtx.currentTime + 0.13);
-  } catch {}
-}
+// Chimes + per-event enable live in ./audio (shared with Settings and the demo
+// panel). Unlock the AudioContext on the first gesture so event-driven chimes
+// are not muted by the WebView autoplay policy.
+audio.bindAudioUnlock();
 
 // --- pick + load a pet sprite -------------------------------------------------
 (async () => {
@@ -331,7 +310,7 @@ function maybeNotify(e: AgentEventPayload) {
   // Chimes + notifications fire once , the main window only.
   if (!IS_MAIN) return;
   if (e.state !== "done" && e.state !== "waiting") return;
-  chime(e.state === "done" ? "done" : "waiting");
+  void audio.playSound(e.state === "done" ? "done" : "waiting");
   if (!notifyReady || localStorage.getItem("ap_notify") === "0") return;
   const proj = (e.project ? basename(e.project) : "") || e.agent;
   // Same copy as the macOS notifications.

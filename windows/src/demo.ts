@@ -12,6 +12,7 @@ import { loadCatalog, savedSlug } from "./catalog";
 import { agentIconUrl, uiIcon } from "./icons";
 import { agentLabel, aggregateMood, type Session } from "./state";
 import { t } from "./i18n";
+import * as audio from "./audio";
 
 const AGENTS = ["claude", "codex", "gemini", "cursor", "opencode", "windsurf", "antigravity"];
 const EDITABLE_STATES = ["working", "waiting", "done", "idle"];
@@ -81,18 +82,6 @@ export function initDemo() {
   const active = () => sessions.filter((s) => s.state === "working" || s.state === "waiting");
   const mood = () => (celebrating ? "celebrate" : aggregateMood(sessions));
 
-  function playSound(ev: "done" | "waiting") {
-    const data = localStorage.getItem(`ap_sound_${ev}_data`);
-    if (data) { try { void new Audio(data).play(); return; } catch {} }
-    try {
-      const ctx = new AudioContext();
-      const o = ctx.createOscillator(); const g = ctx.createGain();
-      o.type = "sine"; o.frequency.value = ev === "done" ? 880 : 560;
-      g.gain.value = 0.05; o.connect(g); g.connect(ctx.destination);
-      o.start(); o.stop(ctx.currentTime + 0.13);
-    } catch {}
-  }
-
   /// Deterministic preview line for idle/done/celebrate (first of the pool).
   function previewLine(m: string): string {
     const pool = bubbleLines(null, m);
@@ -129,7 +118,7 @@ export function initDemo() {
     s.state = state;
     s.stateSince = Date.now();
     s.live = sampleMessage(state);
-    if (state === "waiting") playSound("waiting");
+    if (state === "waiting") void audio.previewSound("waiting");
     after();
     paint();
   }
@@ -144,7 +133,7 @@ export function initDemo() {
   function after() {
     const agg = aggregateMood(sessions);
     if (agg === "done" && lastAgg !== "done") {
-      playSound("done");
+      void audio.previewSound("done");
       celebrating = true;
       if (celebrateTimer) clearTimeout(celebrateTimer);
       celebrateTimer = window.setTimeout(() => { celebrating = false; paint(); }, 3000);

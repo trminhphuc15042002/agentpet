@@ -6,6 +6,7 @@ import { enable, disable, isEnabled } from "@tauri-apps/plugin-autostart";
 import { loadCatalog, savedSlug, saveSlug, getLibrary, addToLibrary, removeFromLibrary, petDisplayName, renamePet, type Pet, type LibPet } from "./catalog";
 import { t, getLang, setLang, type Lang } from "./i18n";
 import { agentIconUrl, uiIcon } from "./icons";
+import * as audio from "./audio";
 import { LAYOUT_PRESETS, readBubbleConfig, type TokenItem, type BubbleToken } from "./bubble";
 import { initDemo } from "./demo";
 import { slice, type Rect } from "./pet";
@@ -1087,25 +1088,9 @@ function initAnimations() {
 }
 
 // ----------------------------------------------------------------- sounds ----
-let settingsAudioCtx: AudioContext | null = null;
-function playSound(ev: "done" | "waiting") {
-  const data = localStorage.getItem(`ap_sound_${ev}_data`);
-  if (data) {
-    try { void new Audio(data).play(); return; } catch {}
-  }
-  try {
-    settingsAudioCtx = settingsAudioCtx || new AudioContext();
-    const o = settingsAudioCtx.createOscillator();
-    const g = settingsAudioCtx.createGain();
-    o.type = "sine";
-    o.frequency.value = ev === "done" ? 880 : 560;
-    g.gain.value = 0.05;
-    o.connect(g);
-    g.connect(settingsAudioCtx.destination);
-    o.start();
-    o.stop(settingsAudioCtx.currentTime + 0.13);
-  } catch {}
-}
+// Playback lives in ./audio (shared engine): it resumes the AudioContext, plays
+// custom uploads through Web Audio (the old `new Audio(data:)` was blocked by the
+// page CSP), and falls back to the built-in chime when a file cannot be decoded.
 
 function initSounds() {
   const filePick = document.createElement("input");
@@ -1127,7 +1112,7 @@ function initSounds() {
     const ev = b.dataset.ev as "done" | "waiting";
     b.onclick = () => {
       switch (b.dataset.act) {
-        case "play": playSound(ev); break;
+        case "play": void audio.previewSound(ev); break;
         case "reset":
           localStorage.removeItem(`ap_sound_${ev}_data`);
           localStorage.removeItem(`ap_sound_${ev}_name`);
@@ -1139,11 +1124,14 @@ function initSounds() {
             if (!f) return;
             if (f.size > 2_000_000) { alert(t("Sound file too large (max 2 MB)")); return; }
             const reader = new FileReader();
-            reader.onload = () => {
+            reader.onload = async () => {
               localStorage.setItem(`ap_sound_${ev}_data`, String(reader.result));
               localStorage.setItem(`ap_sound_${ev}_name`, f.name);
               syncNames();
-              playSound(ev); // preview, like macOS
+              // Warn instead of silently playing the fallback if the file is
+              // not decodable audio.
+              if (!(await audio.customDecodes(ev))) alert(t("Couldn't read that audio file"));
+              void audio.previewSound(ev); // preview, like macOS
             };
             reader.readAsDataURL(f);
             filePick.value = "";
@@ -1153,6 +1141,18 @@ function initSounds() {
       }
     };
   });
+
+  // Volume: one shared level for the built-in chimes and custom uploads.
+  const vol = document.getElementById("ap-volume") as HTMLInputElement | null;
+  if (vol) {
+    vol.value = String(audio.getVolume());
+    let previewAt = 0;
+    vol.addEventListener("input", () => {
+      audio.setVolume(Number(vol.value));
+      const now = Date.now();
+      if (now - previewAt > 250) { previewAt = now; void audio.previewSound("done"); }
+    });
+  }
 }
 
 // --------------------------------------------------------- notifications ----
@@ -1203,6 +1203,7 @@ function applyStatic() {
   set("t-sounds", "Sounds");
   set("t-sound-done", "When an agent finishes");
   set("t-sound-waiting", "When an agent needs input");
+  set("t-volume", "Volume");
   set("t-up-done", "Upload…");
   set("t-up-waiting", "Upload…");
   set("t-df-done", "Default");
@@ -1391,7 +1392,7 @@ function initSliders() {
       const max = Number(r.max) || 100;
       const pct = ((Number(r.value) - min) / (max - min)) * 100;
       r.style.setProperty("--fill", `${pct}%`);
-      if (val) val.textContent = r.value + (r.id === "opacity" ? "%" : "");
+      if (val) val.textContent = r.value + (r.id === "opacity" || r.id === "ap-volume" ? "%" : "");
     };
     r.addEventListener("input", paint);
     paint();
