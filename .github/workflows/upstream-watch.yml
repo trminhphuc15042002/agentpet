@@ -1,0 +1,70 @@
+name: Upstream watch
+
+# Tells you when ntd4996/agentpet has new commits, so you can pull the
+# features worth cherry-picking into this fork. Opens (or updates) a single
+# issue with the commit list and the commands to merge them.
+#
+# Scheduled workflows are disabled on forks until enabled once: GitHub repo →
+# Actions tab → enable workflows. You can also run it by hand from the Actions
+# tab (workflow_dispatch).
+
+on:
+  schedule:
+    - cron: "17 2 * * *" # daily, 02:17 UTC (09:17 Vietnam)
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Compare this fork with upstream
+        id: cmp
+        run: |
+          git remote add upstream https://github.com/ntd4996/agentpet.git
+          git fetch --no-tags upstream main
+          behind=$(git rev-list --count HEAD..upstream/main)
+          echo "behind=$behind" >> "$GITHUB_OUTPUT"
+          if [ "$behind" -gt 0 ]; then
+            {
+              echo "## Upstream \`ntd4996/agentpet\` has $behind new commit(s)"
+              echo
+              echo "New upstream commits:"
+              echo
+              echo '```'
+              git log --oneline --no-decorate HEAD..upstream/main | head -60
+              echo '```'
+              echo
+              echo "Compare: https://github.com/ntd4996/agentpet/compare/${GITHUB_SHA:0:7}...main"
+              echo
+              echo "Pull them into this fork:"
+              echo
+              echo '```bash'
+              echo "git fetch upstream"
+              echo "git merge upstream/main   # or: git rebase upstream/main <feature-branch>"
+              echo '```'
+              echo
+              echo "_Opened by the Upstream watch workflow._"
+            } > /tmp/body.md
+          fi
+
+      - name: Open or update the tracking issue
+        if: steps.cmp.outputs.behind != '0'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          title="Upstream ntd4996/agentpet has new commits"
+          n=$(gh issue list --repo "$GITHUB_REPOSITORY" --state open \
+                --search "\"$title\" in:title" --json number --jq '.[0].number // empty')
+          if [ -n "$n" ]; then
+            gh issue comment "$n" --repo "$GITHUB_REPOSITORY" --body-file /tmp/body.md
+          else
+            gh issue create --repo "$GITHUB_REPOSITORY" --title "$title" --body-file /tmp/body.md
+          fi
