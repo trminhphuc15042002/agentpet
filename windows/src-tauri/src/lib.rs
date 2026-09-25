@@ -528,6 +528,7 @@ pub fn run() {
             let handle = app.handle().clone();
             std::thread::spawn(move || {
                 let mut last_ignore: Option<bool> = None;
+                let mut last_popover: Option<bool> = None;
                 let mut flip_logs: u32 = 0;
                 let mut last_saved = read_pos();
                 let mut tick: u32 = 0;
@@ -536,6 +537,20 @@ pub fn run() {
                     let Some(win) = handle.get_webview_window("pet") else {
                         continue;
                     };
+
+                    // While the popover is open, drop the pet's topmost flag so
+                    // the popover (also topmost) is drawn above it. Creation/
+                    // show-time topmost on the popover was not enough: the pet,
+                    // being topmost too, still covered the card. Restored as soon
+                    // as the popover hides.
+                    let popover_open = handle
+                        .get_webview_window("popover")
+                        .and_then(|p| p.is_visible().ok())
+                        .unwrap_or(false);
+                    if Some(popover_open) != last_popover {
+                        let _ = win.set_always_on_top(!popover_open);
+                        last_popover = Some(popover_open);
+                    }
 
                     // Cross-platform (tao): cursor + window in physical px.
                     // Fail-safe: while the hit rect is unknown (webview still

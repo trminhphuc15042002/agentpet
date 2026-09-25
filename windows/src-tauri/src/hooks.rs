@@ -336,6 +336,20 @@ export default {
       if (found) dirs.set(sid, found)
       return dirs.get(sid) || found || baseDir
     }
+    // The model can arrive on session.model.selected, but also on session.updated
+    // / message info (info.model / modelID). Read it from any event so a session
+    // that started before this plugin loaded still reports its model.
+    const extractModel = (event) => {
+      const p = propsOf(event)
+      const info = p.info || {}
+      return (
+        modelName(p.model) ||
+        modelName(info.model) ||
+        getString(p.modelID) ||
+        getString(info.modelID) ||
+        ""
+      )
+    }
     const send = (state, sid, tokens, cost, event) => {
       try {
         const project = projectFor(event, sid)
@@ -365,6 +379,8 @@ export default {
           for await (const event of ctx.event.subscribe({ signal: controller.signal })) {
             const type = (event && event.type) || ""
             const sid = sidFor(event)
+            const mdl = extractModel(event)
+            if (mdl) models.set(sid, mdl)
             // OpenCode V2 event names. V1 names (session.status /
             // session.idle / session.updated) are no longer emitted, so the
             // turn end comes from session.execution.*. Remember the driving
@@ -372,9 +388,6 @@ export default {
             if (type === "session.agent.selected") {
               const role = (propsOf(event).agent) || ""
               if (role) roles.set(sid, role)
-            } else if (type === "session.model.selected") {
-              const name = modelName(propsOf(event).model)
-              if (name) models.set(sid, name)
             } else if (type === "permission.asked" || type === "session.permission.create") {
               send("waiting", sid, 0, 0, event)
             } else if (type === "session.execution.succeeded" ||
