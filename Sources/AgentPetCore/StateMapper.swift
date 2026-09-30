@@ -13,7 +13,7 @@ public enum StateMapper {
         case .gemini: return eventName == "SessionEnd"
         case .cursor: return eventName == "sessionEnd"
         case .droid: return eventName == "SessionEnd"
-        case .grok: return eventName == "session_end"
+        case .grok, .jcode: return eventName == "session_end"
         default: return false
         }
     }
@@ -136,6 +136,16 @@ public enum StateMapper {
             case "user_prompt_submit", "pre_tool_use", "post_tool_use": return .working
             case "notification": return .waiting
             case "stop": return .done
+            default: return nil
+            }
+        case .jcode:
+            // jcode observer hooks. post_tool doubles as a heartbeat so a long
+            // turn isn't pruned as stale (SessionStore.staleActiveAfter).
+            // A turn ending on a question arrives pre-normalised as "waiting".
+            switch eventName {
+            case "session_start": return .registered
+            case "turn_start", "post_tool": return .working
+            case "turn_end": return .done
             default: return nil
             }
         case .cli, .unknown:

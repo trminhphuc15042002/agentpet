@@ -43,14 +43,17 @@ public enum EventSender {
             return .ask
         }
         defer { close(fd) }
-        guard writeAll(line, fd: fd) else { return .ask }
-
+        // Set the read timeout BEFORE writing: a fast daemon can reply and
+        // close before we get here, and on macOS setsockopt on a socket whose
+        // peer has shut down fails with EINVAL, which used to turn a valid
+        // reply already in the buffer into `.ask`.
         var tv = timeval(
             tv_sec: Int(timeout), tv_usec: Int32(timeout.truncatingRemainder(dividingBy: 1) * 1_000_000)
         )
         guard setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size)) == 0 else {
             return .ask
         }
+        guard writeAll(line, fd: fd) else { return .ask }
 
         let deadline = Date().addingTimeInterval(timeout)
         var buffer = Data()

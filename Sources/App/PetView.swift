@@ -5,10 +5,24 @@ import AgentPetCore
 // MARK: - Animations environment key
 
 private struct AnimationsEnabledKey: EnvironmentKey { static let defaultValue = true }
+private struct PetOnScreenKey: EnvironmentKey { static let defaultValue = true }
+private struct BubbleTailOffsetKey: EnvironmentKey { static let defaultValue: CGFloat = 0 }
 extension EnvironmentValues {
     var animationsEnabled: Bool {
         get { self[AnimationsEnabledKey.self] }
         set { self[AnimationsEnabledKey.self] = newValue }
+    }
+    /// False while the pet window can't be seen (occluded, displays asleep).
+    /// Pauses non-visual timers such as the carousel rotation.
+    var petOnScreen: Bool {
+        get { self[PetOnScreenKey.self] }
+        set { self[PetOnScreenKey.self] = newValue }
+    }
+    /// Horizontal shift of a pet bubble's bottom tail so it points at the pet
+    /// when the pet is offset inside its window.
+    var bubbleTailOffset: CGFloat {
+        get { self[BubbleTailOffsetKey.self] }
+        set { self[BubbleTailOffsetKey.self] = newValue }
     }
 }
 
@@ -16,6 +30,16 @@ extension EnvironmentValues {
 private let ERASE_INTERVAL: TimeInterval = 0.080
 private let TYPE_INTERVAL: TimeInterval = 0.045
 private let DOT_CYCLE_INTERVAL: TimeInterval = 0.400
+/// A message that replaces one shown for less than this is swapped in
+/// instantly instead of erase/retyped. Busy agents change the activity line
+/// every second or two, and each typed character is a full SwiftUI re-render
+/// of the bubble, so animating every change kept the app (and WindowServer)
+/// busy continuously. The typewriter still plays for "calm" transitions.
+private let SNAP_WINDOW: TimeInterval = 3.0
+/// Elapsed-time labels show seconds below this many seconds, then whole
+/// minutes. Shared by the label (`AgentRow.elapsedString`) and its tick
+/// schedule (`ElapsedSchedule`) so the two can't drift apart.
+private let ELAPSED_SECONDS_LIMIT = 60
 
 /// The pet sprite alone (imported pack, reacting to mood). Shows a paw
 /// placeholder if no pet is selected yet. The pet id and mood come from the
@@ -55,6 +79,14 @@ private struct PetContentSizeKey: PreferenceKey {
     }
 }
 
+/// Layout width of the pet's speech bubble (widest one while two cross-fade).
+private struct BubbleWidthKey: PreferenceKey {
+    static var defaultValue: CGFloat { 0 }
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        value = max(value, nextValue())
+    }
+}
+
 /// The full floating window content: a chat bubble above the pet. Per-window
 /// fields (mood/petID/sessions/chatLine) come from `model`; global toggles and
 /// the tap-interaction state still come from `PetController.shared`.
@@ -71,15 +103,15 @@ struct FloatingPetView: View {
     var body: some View {
         VStack(spacing: 2) {
             if pet.showChat && model.petID != nil {
-                if bubbleSettings.multiAgentBubbleEnabled && !model.sessions.isEmpty {
-                    AgentBubble(sessions: model.sessions)
-                        .padding(.horizontal, 10).padding(.vertical, 6)
-                        .transition(AnyTransition.scale(scale: 0.6).combined(with: .opacity))
+                // Gate on the sessions the bubble will actually show: if the
+                // state/kind filters hide all of them, drawing AgentBubble
+                // would leave an empty (off-centre, contentless) bubble.
+                if bubbleSettings.multiAgentBubbleEnabled
+                    && !AgentBubble.visible(model.sessions, settings: bubbleSettings).isEmpty {
+                    alignedToPet(AgentBubble(sessions: model.sessions))
                 } else if !model.chatLine.isEmpty {
-                    ChatBubble(text: model.chatLine,
-                               projectName: pet.splitPet ? model.projectName : nil)
-                        .padding(.horizontal, 10).padding(.vertical, 6)
-                        .transition(AnyTransition.scale(scale: 0.6).combined(with: .opacity))
+                    alignedToPet(ChatBubble(text: model.chatLine,
+                                            projectName: pet.splitPet ? model.projectName : nil))
                 }
             }
             PetView(model: model, size: pet.petPoint)
@@ -119,6 +151,13 @@ struct FloatingPetView: View {
                 )
                 .animation(.interpolatingSpring(stiffness: 300, damping: 8), value: model.isPetted)
                 .gesture(petDragOrTap)
+                // Kept under its on-screen spot when the window is pushed back
+                // onto the screen (offset doesn't change the measured size).
+                .offset(x: model.petOffset)
+                // The window jumps instantly, so the counter-shift must too:
+                // animating it (outer spring on sessions.count) slid the pet
+                // out of the window for a few frames.
+                .animation(nil, value: model.petOffset)
         }
         .fixedSize(horizontal: true, vertical: true)
         .animation(.spring(response: 0.3, dampingFraction: 0.7), value: model.petReactionLine)
@@ -130,12 +169,40 @@ struct FloatingPetView: View {
         .onPreferenceChange(PetContentSizeKey.self) { [key = model.key] size in
             PetWindowController.shared.resizeToContent(size, forKey: key)
         }
+        .onPreferenceChange(BubbleWidthKey.self) { bubbleWidth = $0 }
         .animation(.easeInOut(duration: 0.22), value: model.chatLine)
         .animation(.spring(response: 0.35, dampingFraction: 0.7), value: model.sessions.count)
         .animation(.easeInOut, value: pet.showChat)
         // Re-resolve bubble text when the app language changes at runtime.
         .environment(\.locale, appLang.locale)
-        .environment(\.animationsEnabled, pet.animationsEnabled)
+        // An unseen pet runs no animation at all (sprite, dot, typewriter,
+        // pulse, elapsed tick); it resumes as soon as the window is visible.
+        .environment(\.animationsEnabled, pet.animationsEnabled && model.isOnScreen)
+        .environment(\.petOnScreen, model.isOnScreen)
+    }
+
+    // Layout width of the bubble incl. padding (unaffected by offset/scale, so
+    // no feedback loop with the shifts below).
+    @State private var bubbleWidth: CGFloat = 0
+
+    /// Horizontal padding around the pet's bubble.
+    private static let bubblePadding: CGFloat = 10
+    /// Min distance from the tail to the bubble's edge (corner radius + half tail).
+    private static let tailClearance: CGFloat = 20
+
+    private func alignedToPet<B: View>(_ bubble: B) -> some View {
+        let layout = PetWindowGeometry.bubbleLayout(
+            petOffset: model.petOffset, windowWidth: model.windowWidth, bubbleWidth: bubbleWidth,
+            bubbleInset: Self.bubblePadding, tailClearance: Self.tailClearance)
+        return bubble
+            .padding(.horizontal, Self.bubblePadding).padding(.vertical, 6)
+            .background(GeometryReader { proxy in
+                Color.clear.preference(key: BubbleWidthKey.self, value: proxy.size.width)
+            })
+            .environment(\.bubbleTailOffset, layout.tailShift)
+            .offset(x: layout.bubbleShift)
+            .animation(nil, value: layout.bubbleShift)
+            .transition(AnyTransition.scale(scale: 0.6).combined(with: .opacity))
     }
 
     /// One gesture drives both interactions so they never fight: a drag past a
@@ -183,17 +250,23 @@ struct AgentBubble: View {
     let sessions: [AgentSession]
     var tailEdge: Edge = .bottom
     @ObservedObject private var settings = BubbleSettings.shared
+    @Environment(\.bubbleTailOffset) private var tailOffset
 
     // attentionPriority is internal to AgentPetCore — use local rank
     private func rank(_ s: AgentState) -> Int {
         switch s { case .working: 4; case .waiting: 3; case .done: 2; case .registered: 1; case .idle: 0 }
     }
 
-    private var groupedSessions: [GroupedSession] {
-        // 1. Filter
-        let filtered = sessions
+    /// Sessions the bubble shows under the user's kind/state filters.
+    static func visible(_ sessions: [AgentSession], settings: BubbleSettings) -> [AgentSession] {
+        sessions
             .filter { !settings.hiddenKinds.contains($0.agentKind) }
             .filter { settings.minStateFilter.includes($0.state) }
+    }
+
+    private var groupedSessions: [GroupedSession] {
+        // 1. Filter
+        let filtered = Self.visible(sessions, settings: settings)
 
         // 2. Sort (grouped mode always sorts by kind first)
         var sorted = filtered
@@ -283,6 +356,7 @@ struct AgentBubble: View {
                 Triangle()
                     .fill(fill)
                     .frame(width: 12, height: 7)
+                    .offset(x: tailOffset)
             }
         }
         .fixedSize(horizontal: isPetChat, vertical: true)
@@ -344,24 +418,36 @@ private struct BubbleCarousel: View {
     let groups: [GroupedSession]
     var chatStyle: Bool = false
     @ObservedObject private var settings = BubbleSettings.shared
+    @Environment(\.petOnScreen) private var onScreen
     @State private var index = 0
+    /// Live number of groups, refreshed on every render. The rotation timer's
+    /// closure captures a copy of this view, so reading `groups.count` there
+    /// sees the count from when the timer was armed (and each `step` re-arms
+    /// it from that same stale copy). A reference box is shared by all copies.
+    @State private var live = LiveCount()
     @State private var timer: Timer?
     @State private var dragOffset: CGFloat = 0
 
     private static let interval: TimeInterval = 3.0
     private static let swipeThreshold: CGFloat = 32
 
+    /// `index` wrapped to the groups on screen now, so a render between a
+    /// group dropping out and `onChange` resetting `index` never reads past
+    /// the end (which drew an empty bubble).
+    private var shownIndex: Int { CarouselIndex.shown(index, count: groups.count) }
+
     var body: some View {
+        let _ = live.value = groups.count
         VStack(alignment: .leading, spacing: chatStyle ? 4 : 5) {
             Group {
-                if let group = groups[safe: index] {
+                if let group = groups[safe: shownIndex] {
                     AgentRow(session: group.session, count: group.count, chatStyle: chatStyle)
                         .id(group.id)
                         .transition(.opacity)
                 }
             }
             .offset(x: dragOffset)
-            .animation(.easeInOut(duration: 0.35), value: index)
+            .animation(.easeInOut(duration: 0.35), value: shownIndex)
             .clipped()
 
             if groups.count > 1 {
@@ -369,7 +455,7 @@ private struct BubbleCarousel: View {
                     Spacer(minLength: 0)
                     ForEach(0..<groups.count, id: \.self) { i in
                         Circle()
-                            .fill(i == index ? dotActive : dotInactive)
+                            .fill(i == shownIndex ? dotActive : dotInactive)
                             .frame(width: 4, height: 4)
                     }
                     Spacer(minLength: 0)
@@ -388,6 +474,7 @@ private struct BubbleCarousel: View {
         .highPriorityGesture(swipeGesture)
         .onAppear { syncTimer() }
         .onDisappear { stopTimer() }
+        .onChange(of: onScreen) { _ in syncTimer() }
         .onChange(of: groups.map(\.id)) { _ in
             index = 0
             dragOffset = 0
@@ -428,16 +515,17 @@ private struct BubbleCarousel: View {
     private var dotInactive: Color { dotColor(0.25) }
 
     private func step(by delta: Int) {
-        guard groups.count > 1 else { return }
+        let count = live.value
+        guard count > 1 else { return }
         withAnimation(.easeInOut(duration: 0.35)) {
-            index = (index + delta + groups.count) % groups.count
+            index = CarouselIndex.step(index, by: delta, count: count)
         }
         syncTimer()
     }
 
     private func syncTimer() {
         stopTimer()
-        guard groups.count > 1 else { return }
+        guard groups.count > 1, onScreen else { return }
         timer = Timer.scheduledTimer(withTimeInterval: Self.interval, repeats: true) { _ in
             Task { @MainActor in step(by: 1) }
         }
@@ -446,6 +534,26 @@ private struct BubbleCarousel: View {
     private func stopTimer() {
         timer?.invalidate()
         timer = nil
+    }
+}
+
+/// Mutable box so every copy of `BubbleCarousel` reads the same live value.
+@MainActor
+private final class LiveCount {
+    var value = 0
+}
+
+/// Carousel page arithmetic, kept pure so it can be unit tested.
+enum CarouselIndex {
+    /// The page to draw for a stored `index` that may be stale (past the end).
+    static func shown(_ index: Int, count: Int) -> Int {
+        count > 0 ? ((index % count) + count) % count : 0
+    }
+
+    /// The page after moving `delta` steps, wrapping within `count` pages.
+    static func step(_ index: Int, by delta: Int, count: Int) -> Int {
+        guard count > 0 else { return 0 }
+        return shown(index + delta, count: count)
     }
 }
 
@@ -592,6 +700,7 @@ private struct AnimatedStatusText: View {
 
     @State private var typeTarget: [Character] = []
     @State private var typeIndex = 0
+    @State private var lastRestart = Date.distantPast
 
     @State private var eraseTimer: Timer?
     @State private var typeTimer: Timer?
@@ -616,7 +725,11 @@ private struct AnimatedStatusText: View {
             }
             content
         }
-        .onAppear { restart(to: message) }
+        // Appear shows the message at once: in carousel mode every rotation
+        // (every few seconds) re-creates the row, and retyping it each time
+        // was a steady stream of per-character re-renders. The typewriter is
+        // kept for actual message changes.
+        .onAppear { snap(to: message) }
         .onChange(of: message) { restart(to: $0) }
         .onDisappear { cancelAll() }
     }
@@ -644,6 +757,13 @@ private struct AnimatedStatusText: View {
     // MARK: Phase transitions
 
     private func restart(to newMessage: String) {
+        let now = Date()
+        let rapid = now.timeIntervalSince(lastRestart) < SNAP_WINDOW
+        lastRestart = now
+        if rapid && !displayed.isEmpty {
+            snap(to: newMessage)
+            return
+        }
         reserveText = newMessage.count >= displayed.count ? newMessage : displayed
         cancelAll()
         isStable = false
@@ -652,6 +772,23 @@ private struct AnimatedStatusText: View {
         } else {
             startErasing(to: newMessage)
         }
+    }
+
+    /// Shows `newMessage` immediately in its stable phase (no erase/retype).
+    private func snap(to newMessage: String) {
+        cancelAll()
+        setTarget(newMessage)
+        typeIndex = typeTarget.count
+        displayed = String(typeTarget)
+        enterStablePhase()
+    }
+
+    /// Splits off the trailing ellipsis and sets what the typewriter will type.
+    private func setTarget(_ newMessage: String) {
+        let stripped = Self.stripEllipsis(newMessage)
+        baseText = stripped.text
+        hasEllipsis = stripped.hasEllipsis
+        typeTarget = Array(hasEllipsis ? stripped.text : newMessage)
     }
 
     private func startErasing(to newMessage: String) {
@@ -672,10 +809,7 @@ private struct AnimatedStatusText: View {
     }
 
     private func startTyping(_ newMessage: String) {
-        let stripped = Self.stripEllipsis(newMessage)
-        baseText = stripped.text
-        hasEllipsis = stripped.hasEllipsis
-        typeTarget = Array(hasEllipsis ? stripped.text : newMessage)
+        setTarget(newMessage)
         typeIndex = 0
         displayed = ""
         typeTimer = Timer.scheduledTimer(withTimeInterval: TYPE_INTERVAL, repeats: true) { _ in
@@ -858,9 +992,10 @@ private struct AgentRow: View {
             }
         case .elapsed:
             if animationsEnabled {
-                // Tick every second so the elapsed time counts up live instead of
-                // freezing at the value sampled when the row was last re-rendered.
-                TimelineView(.periodic(from: .now, by: 1)) { context in
+                // Tick live, but only as often as the label can change: every
+                // second under a minute, then on minute boundaries ("3m",
+                // "1h 5m"), instead of a 1 Hz re-render per row forever.
+                TimelineView(ElapsedSchedule(since: session.stateSince)) { context in
                     Text(elapsedString(since: session.stateSince, now: context.date))
                         .font(.system(size: secondaryPt, weight: .regular))
                         .foregroundStyle(textColor(0.45))
@@ -943,7 +1078,7 @@ private struct AgentRow: View {
 
     private func elapsedString(since date: Date, now: Date = Date()) -> String {
         let s = max(0, Int(now.timeIntervalSince(date)))
-        if s < 60  { return "\(s)s" }
+        if s < ELAPSED_SECONDS_LIMIT { return "\(s)s" }
         let m = s / 60
         if m < 60  { return "\(m)m" }
         return "\(m / 60)h \(m % 60)m"
@@ -1060,6 +1195,7 @@ struct ChatBubble: View {
     let text: String
     var projectName: String? = nil
     @ObservedObject private var settings = BubbleSettings.shared
+    @Environment(\.bubbleTailOffset) private var tailOffset
 
     private var fill: Color {
         switch settings.theme {
@@ -1122,6 +1258,7 @@ struct ChatBubble: View {
             Triangle()
                 .fill(fill)
                 .frame(width: 12, height: 7)
+                .offset(x: tailOffset)
         }
         .fixedSize(horizontal: true, vertical: true)
         .frame(maxWidth: 420)
@@ -1211,9 +1348,15 @@ private struct StateDotLayer: NSViewRepresentable {
 final class StateDotNSView: NSView {
     private static let glyphFrames = ["✶", "✳", "✢", "✻", "✽", "✺"]
     private static let glyphInterval: TimeInterval = 0.15
+    /// Rendered glyph frames keyed by color+scale. Rows are re-created on
+    /// every carousel rotation, so re-rasterising six glyphs per row each time
+    /// showed up as the top app-side cost. Only a handful of state colors
+    /// exist, so this stays tiny.
+    @MainActor private static var glyphCache: [String: [CGImage]] = [:]
 
     private var lastColor: NSColor?
     private var lastStyle: BubbleSettings.DotStyle?
+    private var builtScale: CGFloat?
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
@@ -1240,6 +1383,7 @@ final class StateDotNSView: NSView {
     private var currentScale: CGFloat { window?.backingScaleFactor ?? 2 }
 
     private func rebuild(nsColor: NSColor, style: BubbleSettings.DotStyle) {
+        builtScale = currentScale
         let host = layer ?? CALayer()
         host.sublayers?.forEach { $0.removeFromSuperlayer() }
         host.removeAllAnimations()
@@ -1294,7 +1438,20 @@ final class StateDotNSView: NSView {
     /// pre-rendered glyph images via a discrete keyframe animation.
     private func buildClaude(on host: CALayer, nsColor: NSColor) {
         let scale = currentScale
-        let images = Self.glyphFrames.compactMap { glyphImage($0, color: nsColor, scale: scale) }
+        // Key on the sRGB components, not `description` (its text format is
+        // not a stable identity and can differ for equal colors).
+        let rgba = nsColor.usingColorSpace(.sRGB).map {
+            [$0.redComponent, $0.greenComponent, $0.blueComponent, $0.alphaComponent]
+                .map { String(format: "%.4f", $0) }.joined(separator: ",")
+        } ?? nsColor.description
+        let cacheKey = "\(rgba)@\(scale)"
+        let images: [CGImage]
+        if let cached = Self.glyphCache[cacheKey] {
+            images = cached
+        } else {
+            images = Self.glyphFrames.compactMap { glyphImage($0, color: nsColor, scale: scale) }
+            Self.glyphCache[cacheKey] = images
+        }
 
         let content = CALayer()
         content.frame = bounds
@@ -1354,7 +1511,10 @@ final class StateDotNSView: NSView {
     override func viewDidChangeBackingProperties() {
         super.viewDidChangeBackingProperties()
         // Re-render at the new backing scale for crispness on display changes.
-        if let style = lastStyle, let color = lastColor {
+        // Skip when the scale is unchanged (e.g. the first attach to a window),
+        // which otherwise rebuilt every freshly created dot a second time.
+        let scale = currentScale
+        if scale != builtScale, let style = lastStyle, let color = lastColor {
             rebuild(nsColor: color, style: style)
         }
     }
@@ -1371,24 +1531,63 @@ final class StateDotNSView: NSView {
 // MARK: - Waiting text flash
 
 /// Gently pulses row text opacity when waiting for input (no strikethrough).
+/// Implemented as a short eased toggle on a timer rather than a SwiftUI
+/// `repeatForever` animation: the latter re-renders the bubble at display rate
+/// for as long as a session waits (often minutes), which was a steady CPU and
+/// WindowServer cost. Here SwiftUI only animates ~30% of each cycle.
 private struct WaitingTextFlash: ViewModifier {
     let active: Bool
+    private static let cycle: TimeInterval = 1.0
+    private static let fade: TimeInterval = 0.3
     @State private var dimmed = false
+    @State private var timer: Timer?
 
     func body(content: Content) -> some View {
         content
             .opacity(active ? (dimmed ? 0.65 : 1.0) : 1.0)
             .onAppear { sync() }
             .onChange(of: active) { _ in sync() }
+            .onDisappear { stop() }
     }
 
     private func sync() {
+        stop()
         if active {
-            withAnimation(.easeInOut(duration: 0.85).repeatForever(autoreverses: true)) {
-                dimmed = true
+            let t = Timer(timeInterval: Self.cycle, repeats: true) { _ in
+                Task { @MainActor in
+                    withAnimation(.easeInOut(duration: Self.fade)) { dimmed.toggle() }
+                }
             }
-        } else {
-            dimmed = false
+            RunLoop.main.add(t, forMode: .common)
+            timer = t
+        }
+    }
+
+    private func stop() {
+        timer?.invalidate()
+        timer = nil
+        dimmed = false
+    }
+}
+
+/// Timeline for the elapsed-time token: one entry per second while the label
+/// shows seconds, then one per whole minute since `since`.
+private struct ElapsedSchedule: TimelineSchedule {
+    let since: Date
+
+    func entries(from startDate: Date, mode: TimelineScheduleMode) -> AnyIterator<Date> {
+        var next = startDate
+        let since = since
+        return AnyIterator {
+            let current = next
+            let elapsed = max(0, current.timeIntervalSince(since))
+            if elapsed < Double(ELAPSED_SECONDS_LIMIT - 1) {
+                next = current.addingTimeInterval(1)
+            } else {
+                let intoMinute = elapsed.truncatingRemainder(dividingBy: 60)
+                next = current.addingTimeInterval(60 - intoMinute)
+            }
+            return current
         }
     }
 }

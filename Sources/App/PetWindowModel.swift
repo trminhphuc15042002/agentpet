@@ -17,6 +17,16 @@ final class PetWindowModel: ObservableObject {
     @Published var sessions: [AgentSession]
     @Published var count: Int
     @Published var chatLine: String
+    /// False while this pet's panel is fully occluded or the displays are
+    /// asleep/locked. Views pause every animation and timer while false so an
+    /// unseen pet costs ~no CPU. Driven by `PetWindowController`.
+    @Published var isOnScreen = true
+    /// Horizontal shift of the pet inside its window. Non-zero when the window
+    /// was pushed back onto the pet's screen (wide bubble near an edge), so the
+    /// pet stays put on screen. Driven by `PetWindowController`.
+    @Published var petOffset: CGFloat = 0
+    /// Current width of this pet's window (content is centred in it).
+    @Published var windowWidth: CGFloat = 0
 
     init(
         key: String,

@@ -121,6 +121,25 @@ final class ApprovalRoundTripTests: XCTestCase {
         XCTAssertEqual(box.value, event)
     }
 
+    /// Root cause of the old flaky `testApproveRoundTrip`: on macOS,
+    /// setting SO_RCVTIMEO on a socket whose peer already replied and closed
+    /// fails with EINVAL. `sendAndAwaitReply` must therefore set it before
+    /// writing, while the peer can't have replied yet. This pins the OS
+    /// behaviour the ordering depends on.
+    func testReceiveTimeoutFailsOncePeerHasClosed() {
+        var fds: [Int32] = [0, 0]
+        fds.withUnsafeMutableBufferPointer { _ = socketpair(AF_UNIX, SOCK_STREAM, 0, $0.baseAddress) }
+        defer { close(fds[0]) }
+        var tv = timeval(tv_sec: 1, tv_usec: 0)
+        let size = socklen_t(MemoryLayout<timeval>.size)
+        XCTAssertEqual(setsockopt(fds[0], SOL_SOCKET, SO_RCVTIMEO, &tv, size), 0, "peer open: must succeed")
+
+        _ = Data("x\n".utf8).withUnsafeBytes { write(fds[1], $0.baseAddress, $0.count) }
+        close(fds[1])
+        XCTAssertNotEqual(setsockopt(fds[0], SOL_SOCKET, SO_RCVTIMEO, &tv, size), 0,
+                          "peer closed: macOS rejects SO_RCVTIMEO")
+    }
+
     func testApprovalResponseJSONForAllow() throws {
         try assertApprovalResponseJSON(.allow, expectedPermissionDecision: "allow")
     }

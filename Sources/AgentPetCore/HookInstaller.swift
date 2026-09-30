@@ -369,6 +369,8 @@ public enum HookInstaller {
             let bin = binaryPath(fromCommand: command)
             let source = style == .piExtension ? piExtension(binary: bin) : opencodePlugin(binary: bin)
             try Data(source.utf8).write(to: URL(fileURLWithPath: path), options: .atomic)
+        case .jcodeToml:
+            try JcodeHookConfig.installToDisk(command: command, path: path, events: events)
         }
     }
 
@@ -385,6 +387,8 @@ public enum HookInstaller {
             if isInstalledOnDisk(path: path, events: events, style: style) {
                 try? FileManager.default.removeItem(atPath: path)
             }
+        case .jcodeToml:
+            try JcodeHookConfig.uninstallFromDisk(path: path, events: events)
         }
     }
 
@@ -400,6 +404,8 @@ public enum HookInstaller {
         case .opencodePlugin, .piExtension:
             guard let s = try? String(contentsOfFile: path, encoding: .utf8) else { return false }
             return isOurs(s)
+        case .jcodeToml:
+            return JcodeHookConfig.isInstalled(in: JcodeHookConfig.read(path: path), events: events)
         }
     }
 }
