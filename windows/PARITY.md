@@ -76,7 +76,7 @@ Trạng thái: ✅ có rồi · 🔧 đang port đợt này · ⏳ để đợt 
 ## Phạm vi port upstream v1.17.0 / v1.17.1
 
 > Các mốc `v1.17.0` / `v1.17.1` ở đây là phạm vi release upstream macOS,
-> không phải Windows package version; bản Windows của fork là `0.1.12`.
+> không phải Windows package version; bản Windows của fork là `0.1.13`.
 
 | Phạm vi | Windows |
 |---|---|

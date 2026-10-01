@@ -1,5 +1,20 @@
 # Windows 0.1.12 validation
 
+## 0.1.13 follow-up: transient task-completion motion
+
+Installed 0.1.12 showed a transient 127px horizontal jump during resize despite
+settled-frame checks passing. Position and size must use a **single Win32
+SetWindowPos** operation, not two Tauri setters, even on the UI thread. The
+operation preserves z-order/focus and updates state only after success.
+
+Native QA now samples intermediate frames during 24 deliberate resizes and six
+working→done→idle cycles, including the final celebration expiry. On the attached
+150% display the observed maximum center drift was 0.5px horizontally and 0px
+vertically. DOM/HWND snapshots must agree on dimensions before computing the
+canvas anchor; non-target pets are parked inside the work area for click tests.
+Diagnostic debug.log appends during installed-app restart are excluded from the
+configuration hash assertion; persisted configuration remains checked.
+
 Validated on 2026-10-01 with the Windows GNU toolchain, one 2560×1600 display,
 144 DPI (150% scale), and the packaged frontend in a real Tauri/WebView2 window.
 

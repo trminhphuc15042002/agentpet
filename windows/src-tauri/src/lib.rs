@@ -21,7 +21,7 @@ use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 use tauri::menu::{Menu, MenuItem};
 use tauri::tray::TrayIconBuilder;
-use tauri::{Emitter, LogicalSize, Manager, PhysicalPosition, WebviewUrl, WebviewWindowBuilder};
+use tauri::{Emitter, Manager, PhysicalPosition, WebviewUrl, WebviewWindowBuilder};
 
 /// Tray menu items kept around so the language switcher can re-label them live.
 struct TrayItems {
@@ -274,7 +274,7 @@ fn apply_window_layout(
     logical_w: f64,
     logical_h: f64,
     pet_width_logical: f64,
-) -> ResizeReply {
+) -> Result<ResizeReply, String> {
     let scale = win.scale_factor().unwrap_or(1.0);
     let phys_w = geometry::logical_to_physical(logical_w, scale).round();
     let phys_h = geometry::logical_to_physical(logical_h, scale).round();
@@ -284,11 +284,8 @@ fn apply_window_layout(
     let visible = pick_work_area(win, ax, ay)
         .unwrap_or(geometry::VisibleRect::from_pos_size(0.0, 0.0, phys_w, phys_h));
     let layout = geometry::layout_window(ax, ay, phys_w, phys_h, pet_w, visible);
-    let _ = win.set_position(PhysicalPosition::new(
-        layout.origin_x.round() as i32,
-        layout.origin_y.round() as i32,
-    ));
-    let _ = win.set_size(LogicalSize::new(logical_w, logical_h));
+    set_pet_frame(win, layout.origin_x.round() as i32, layout.origin_y.round() as i32,
+        phys_w as i32, phys_h as i32)?;
     st.last_w = logical_w;
     st.last_h = logical_h;
     st.pet_width = pet_width_logical;
@@ -301,9 +298,34 @@ fn apply_window_layout(
         phys_h,
         layout.pet_offset,
     ));
-    ResizeReply {
+    Ok(ResizeReply {
         pet_offset: st.pet_offset,
         window_width: logical_w,
+    })
+}
+
+/// Position and size must reach Windows in one operation. Two Tauri setters
+/// expose a frame with the new origin and OLD width, briefly moving the pet by
+/// half the bubble's width change even when called together on the UI thread.
+fn set_pet_frame(win: &tauri::WebviewWindow, x: i32, y: i32, w: i32, h: i32) -> Result<(), String> {
+    #[cfg(windows)]
+    {
+        #[link(name = "user32")]
+        extern "system" {
+            fn SetWindowPos(hwnd: *mut std::ffi::c_void, after: *mut std::ffi::c_void,
+                x: i32, y: i32, w: i32, h: i32, flags: u32) -> i32;
+        }
+        let hwnd = win.hwnd().map_err(|e| e.to_string())?;
+        // SWP_NOZORDER | SWP_NOACTIVATE: never raise or focus the overlay.
+        if unsafe { SetWindowPos(hwnd.0 as _, std::ptr::null_mut(), x, y, w, h, 0x0014) } == 0 {
+            return Err(std::io::Error::last_os_error().to_string());
+        }
+        Ok(())
+    }
+    #[cfg(not(windows))]
+    {
+        win.set_position(PhysicalPosition::new(x, y)).map_err(|e| e.to_string())?;
+        win.set_size(tauri::PhysicalSize::new(w as u32, h as u32)).map_err(|e| e.to_string())
     }
 }
 
@@ -417,7 +439,7 @@ fn resize_pet_window_impl(
             window_width: st.last_w,
         });
     }
-    Ok(apply_window_layout(window, st, width, height, pet_w))
+    apply_window_layout(window, st, width, height, pet_w)
 }
 
 fn lang_file() -> Option<std::path::PathBuf> {
@@ -908,7 +930,7 @@ pub fn run() {
                             let st = map.entry("pet".into()).or_default();
                             st.anchor = Some((ax, ay));
                             st.last_origin = win.outer_position().ok().map(|p| (p.x, p.y));
-                            apply_window_layout(&win, st, 260.0, 320.0, 160.0);
+                            let _ = apply_window_layout(&win, st, 260.0, 320.0, 160.0);
                         }
                     }
                 } else if let Ok(Some(mon)) = win.primary_monitor() {

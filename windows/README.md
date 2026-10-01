@@ -139,7 +139,7 @@ or array/table hooks representation fails closed without overwriting the file.
 ## Upstream parity scope
 
 The `v1.17.0` / `v1.17.1` labels below refer to upstream macOS release scope,
-not the Windows package version. This fork's Windows package is `0.1.12`.
+not the Windows package version. This fork's Windows package is `0.1.13`.
 
 - Bubble clipping/screen bounds, filtered-empty handling, and carousel support
   are implemented and tested natively on one 2560×1600 display at 150% scale,

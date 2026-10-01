@@ -76,6 +76,37 @@ public struct MOUSEINPUT {
 }
 
 public class NativeQa {
+  static Thread frameWatch;
+  static volatile bool watchFrames;
+  static int frameSamples, frameDriftX, frameDriftY, frameWidths;
+  public static void StartFrameWatch(long hwnd) {
+    RECT initial;
+    if (!GetWindowRect(new IntPtr(hwnd), out initial)) throw new Exception("No initial frame");
+    int center2 = initial.Left + initial.Right, bottom = initial.Bottom;
+    frameSamples = frameDriftX = frameDriftY = frameWidths = 0;
+    watchFrames = true;
+    frameWatch = new Thread(() => {
+      var widths = new HashSet<int>();
+      while (watchFrames) {
+        RECT r;
+        if (GetWindowRect(new IntPtr(hwnd), out r)) {
+          frameSamples++;
+          frameDriftX = Math.Max(frameDriftX, Math.Abs(r.Left + r.Right - center2));
+          frameDriftY = Math.Max(frameDriftY, Math.Abs(r.Bottom - bottom));
+          widths.Add(r.Right - r.Left);
+        }
+        Thread.Sleep(1);
+      }
+      frameWidths = widths.Count;
+    });
+    frameWatch.IsBackground = true;
+    frameWatch.Start();
+  }
+  public static int[] StopFrameWatch() {
+    watchFrames = false;
+    if (frameWatch != null) frameWatch.Join();
+    return new int[] { frameSamples, frameDriftX, frameDriftY, frameWidths };
+  }
   public delegate bool EnumMonProc(IntPtr hMon, IntPtr hdc, ref RECT lprc, IntPtr dwData);
   public delegate bool EnumWinProc(IntPtr hWnd, IntPtr lParam);
 
@@ -175,7 +206,9 @@ public class NativeQa {
     MouseMove(x, y);
     Thread.Sleep(30);
     MouseDown();
-    Thread.Sleep(30);
+    // A sprite press starts native dragging through asynchronous WebView IPC.
+    // Releasing first can leave a delayed drag active during the next test.
+    Thread.Sleep(250);
     MouseUp();
   }
 
@@ -183,7 +216,7 @@ public class NativeQa {
     MouseMove(x0, y0);
     Thread.Sleep(40);
     MouseDown();
-    Thread.Sleep(40);
+    Thread.Sleep(250);
     if (steps < 2) steps = 2;
     for (int i = 1; i <= steps; i++) {
       int x = x0 + (x1 - x0) * i / steps;
@@ -344,6 +377,7 @@ function Invoke-TargetCdp([string]$needle, [string]$expr) {
 }
 
 function Get-PetGeom([long]$hwnd, [string]$cdpNeedle = "main") {
+  for ($snapshotTry = 0; $snapshotTry -lt 12; $snapshotTry++) {
   $rc = New-Object RECT
   $ok = [NativeQa]::GetWindowRect([IntPtr]$hwnd, [ref]$rc)
   $dom = $null
@@ -354,6 +388,16 @@ function Get-PetGeom([long]$hwnd, [string]$cdpNeedle = "main") {
   $dpr = 1.0
   if ($v -and $v.dpr) { $dpr = [double]$v.dpr }
   if ($dpr -le 0) { $dpr = 1 }
+  $after = New-Object RECT
+  [NativeQa]::GetWindowRect([IntPtr]$hwnd, [ref]$after) | Out-Null
+  # Never combine an old HWND origin with a new DOM viewport. CDP evaluation
+  # takes long enough for a pending bubble resize to land between these reads.
+  $sameFrame = $rc.Left -eq $after.Left -and $rc.Top -eq $after.Top -and $rc.Right -eq $after.Right -and $rc.Bottom -eq $after.Bottom
+  $sameViewport = -not $v -or ([Math]::Abs(($rc.Right-$rc.Left) - $v.innerW*$dpr) -le 2 -and [Math]::Abs(($rc.Bottom-$rc.Top) - $v.innerH*$dpr) -le 2)
+  if ($sameFrame -and $sameViewport) { break }
+  Start-Sleep -Milliseconds 40
+  }
+  if (-not $sameFrame -or -not $sameViewport) { throw "Unable to correlate native/DOM frame for $cdpNeedle hwnd=$hwnd" }
   $ax = $null; $ay = $null
   if ($v -and $v.canvas -and $v.canvas.width -gt 0) {
     $ax = $rc.Left + ($v.canvas.left + $v.canvas.width / 2.0) * $dpr
@@ -478,6 +522,9 @@ function Get-ConfigHashes([string]$dir) {
   $snap = [ordered]@{}
   if (-not (Test-Path $dir)) { return $snap }
   Get-ChildItem -Path $dir -Force | ForEach-Object {
+    # Startup/shutdown append diagnostics when the installed app is restored.
+    # This is a log, not persisted user configuration or care progress.
+    if ($_.Name -eq "debug.log") { return }
     if ($_.PSIsContainer) {
       $snap[$_.Name] = "dir:" + (@(Get-ChildItem $_.FullName -Recurse -File -ErrorAction SilentlyContinue).Count)
     } else {
@@ -780,6 +827,51 @@ try {
   Start-Sleep -Milliseconds 200
   $base = Get-PetGeom ([int64]$mainPet.hwnd) "main"
   if (-not $base.anchorX) { throw "baseline pet anchor missing (canvas rect)" }
+  # Sample intermediate native frames, not just settled endpoints. A split
+  # move/resize used to keep the final anchor but jump ~127px in between.
+  [NativeQa]::MoveWindow([int64]$mainPet.hwnd, ([int]$work.workLeft + 500), ([int]$work.workTop + 300), ($base.right-$base.left), ($base.bottom-$base.top)) | Out-Null
+  Start-Sleep -Milliseconds 1200
+  [NativeQa]::StartFrameWatch([int64]$mainPet.hwnd)
+  try {
+    $resizeCycle = Invoke-MainCdp @'
+(async () => {
+  for (let i = 0; i < 8; i++) {
+    for (const width of [180, 400, 240]) {
+      await window.__TAURI__.core.invoke("resize_pet_window", {width, height: 200, petWidth: document.getElementById("pet").offsetWidth || 160});
+      await new Promise(r => setTimeout(r, 30));
+    }
+  }
+  return true;
+})()
+'@
+  } finally { $motion = [NativeQa]::StopFrameWatch() }
+  Add-Check "resize-transient-anchor" ($resizeCycle.value -eq $true -and $motion[0] -gt 40 -and $motion[1] -le 4 -and $motion[2] -le 2 -and $motion[3] -ge 3) "completed=$($resizeCycle.value) samples=$($motion[0]) maxX=$($motion[1]/2) maxY=$($motion[2]) widths=$($motion[3])" $motion
+  Start-Sleep -Milliseconds 500
+  [NativeQa]::StartFrameWatch([int64]$mainPet.hwnd)
+  $completedCycles = 0
+  try {
+    for ($cycle = 0; $cycle -lt 6; $cycle++) {
+      $transition = Invoke-MainCdp @'
+(async () => {
+  localStorage.setItem("ap_notify", "0");
+  const payload = {agent: "opencode", session: "qa-motion-cycle", project: "motion-qa", title: "QA", ts: Date.now()};
+  await window.__TAURI__.event.emit("agent-event", {...payload, state: "working", message: "Long working message before completing this task and returning to idle"});
+  await new Promise(r => setTimeout(r, 500));
+  await window.__TAURI__.event.emit("agent-event", {...payload, state: "done", message: "Done"});
+  await new Promise(r => setTimeout(r, 500));
+  await window.__TAURI__.event.emit("agent-end", "qa-motion-cycle");
+  await new Promise(r => setTimeout(r, 500));
+  return true;
+})()
+'@
+      if ($transition.value -eq $true) { $completedCycles++ }
+    }
+    # Also watch the final 3s celebration expire into idle, not only the
+    # settled frame after it. Subsequent five-row checks need a quiet baseline.
+    Start-Sleep -Milliseconds 3500
+  } finally { $doneMotion = [NativeQa]::StopFrameWatch() }
+  Add-Check "working-done-idle-anchor" ($completedCycles -eq 6 -and $doneMotion[0] -gt 200 -and $doneMotion[1] -le 4 -and $doneMotion[2] -le 2 -and $doneMotion[3] -ge 2) "cycles=$completedCycles samples=$($doneMotion[0]) maxX=$($doneMotion[1]/2) maxY=$($doneMotion[2]) widths=$($doneMotion[3])" $doneMotion
+  $base = Get-PetGeom ([int64]$mainPet.hwnd) "main"
   $ts0 = [Diagnostics.Stopwatch]::StartNew()
   $agents = @("jcode","claude","copilot","cursor","gemini")
   $i = 0
@@ -1114,15 +1206,20 @@ try {
         continue
       }
       $targetHwnd = [int64]$resolved.win.hwnd
-      $parkX = [int]($work.workRight - 90)
+       # Park fully inside the work area. Off-screen parking races the clamp
+       # loop and a stale frontend resize can undo the intended placement.
+       $parkX = [int]($work.workRight - 700)
       $parkI = 0
       foreach ($pw in $petsNow) {
         if ([int64]$pw.hwnd -eq $targetHwnd) { continue }
         $pwW = $pw.right - $pw.left; $pwH = $pw.bottom - $pw.top
-        [NativeQa]::MoveWindow([int64]$pw.hwnd, $parkX, [int]($work.workTop + 20 + $parkI * 40), [int]$pwW, [int]$pwH) | Out-Null
+         $parkY = [int]($work.workTop + 20 + $parkI * 400)
+         if (-not [NativeQa]::MoveWindow([int64]$pw.hwnd, $parkX, $parkY, [int]$pwW, [int]$pwH)) { throw "Unable to park pet $($pw.hwnd)" }
+         Log "park hwnd=$($pw.hwnd) at=$parkX,$parkY target=$targetHwnd"
         $parkI++
       }
-      $placeX = $formX + 48; $placeY = $formY + 48
+       Start-Sleep -Milliseconds 1200
+       $placeX = $formX + 48; $placeY = $formY + 48
       $sw = $resolved.win.right - $resolved.win.left; $sh = $resolved.win.bottom - $resolved.win.top
       [NativeQa]::MoveWindow($targetHwnd, $placeX, $placeY, [int]$sw, [int]$sh) | Out-Null
       $placed = Wait-NativeRect $targetHwnd $placeX $placeY 20
@@ -1150,6 +1247,9 @@ try {
       [NativeQa]::ClickAt([int]$through.x, [int]$through.y)
       Start-Sleep -Milliseconds 80
       $c1s = if (Test-Path $cf) { [int](Get-Content $cf -Raw) } else { $c0 }
+       $gg = Get-PetGeom $targetHwnd $needle
+       $spritePoint = Get-SpritePoint $gg
+       $spriteX = $spritePoint.x; $spriteY = $spritePoint.y
        $overPet = Wait-UnderForm $spriteX $spriteY $targetHwnd 20
        if (-not $overPet.ok) {
          Add-Check "split-hit-$si" $false "opaque sprite point is not owned by target pet" $overPet
