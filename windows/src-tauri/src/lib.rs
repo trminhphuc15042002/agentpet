@@ -5,6 +5,13 @@ pub mod server;
 pub mod statemap;
 pub mod transcript;
 
+// Unit-test executables also need Common Controls v6 for TaskDialogIndirect.
+// Never apply this to production: tauri-build already links the bin resource,
+// and MSVC rejects two copies of its VERSION/manifest records (CVT1100).
+#[cfg(all(test, windows))]
+#[link(name = "resource", kind = "static", modifiers = "+whole-archive")]
+extern "C" {}
+
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Mutex, OnceLock};

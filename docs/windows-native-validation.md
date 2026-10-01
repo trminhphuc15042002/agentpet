@@ -19,6 +19,8 @@ Validated on 2026-10-01 with the Windows GNU toolchain, one 2560×1600 display,
 
 - Embed Tauri's existing Common Controls v6 resource in library test executables.
   Without it, importing `TaskDialogIndirect` failed at process startup.
+  The additional native link is `cfg(test, windows)` only: the MSVC release
+  linker rejects the duplicate VERSION resource a catch-all link would create.
 - Build the desktop library as `rlib`; an unused GNU `cdylib` exceeded PE's
   export-count limit in debug builds.
 - Apply native frame/anchor changes together on the UI thread. Separately queued
