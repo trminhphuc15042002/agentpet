@@ -1,16 +1,18 @@
 # macOS → Windows parity matrix
 
-Đối chiếu từng chức năng sau khi đọc toàn bộ 9.010 dòng Swift (Sources/App + AgentPetCore).
+Đối chiếu từng chức năng sau khi đọc toàn bộ 9.010 dòng Swift (Sources/App + AgentPetCore); catalog Rust hiện có 13 agents.
 Trạng thái: ✅ có rồi · 🔧 đang port đợt này · ⏳ để đợt sau · ➖ không áp dụng trên Windows.
 
 ## Event pipeline (Core)
 | Chức năng | macOS | Windows |
 |---|---|---|
-| Hook CLI → app (socket/HTTP) | unix socket | ✅ HTTP 127.0.0.1:47628 |
+| Hook CLI → app (socket/HTTP) | unix socket | ✅ HTTP 127.0.0.1:47628; JSON stdin, ngoại lệ jcode dùng `JCODE_HOOK_*` env |
+| jcode lifecycle observers (`~/.jcode/config.toml`) | ✓ | ✅ Settings toggle; `session_start`/`turn_start`/`post_tool`/`turn_end`/`session_end`, không dùng `pre_tool` blocking |
 | State mapping (StateMapper) | ✓ | ✅ ported |
 | Session store + prune (done 30s, stale 300s/90s) | ✓ | ✅ ported |
 | Offline queue (hook chạy khi app tắt → replay) | ✓ | ✅ queue file + drain (đã test) |
 | Claude Stop → đọc transcript → câu hỏi? → waiting (QuestionDetector) | ✓ | ✅ Rust port (đã test end-to-end) |
+| jcode `turn_end` + câu hỏi cuối của assistant → waiting | ✓ | ✅ hỗ trợ; turn lỗi không chuyển thành waiting |
 | Title hội thoại từ transcript (summary/first msg) | ✓ | ✅ Rust port |
 | `agentpet run -- <cmd>` wrapper (working/heartbeat/done) | ✓ | ✅ (đã test) |
 | Notifications (waiting: "X needs input"+msg, done: "X finished") | ✓ | ✅ cùng copy với mac |
@@ -33,7 +35,7 @@ Trạng thái: ✅ có rồi · 🔧 đang port đợt này · ⏳ để đợt 
 ## Bubble đa agent
 | Chức năng | macOS | Windows |
 |---|---|---|
-| Display mode: list / **carousel** (3s + dots) / compact (+N more) | ✓ (mặc định carousel) | ✅ cả 3 (carousel đã test) |
+| Display mode: list / **carousel** (3s + dots) / compact (+N more) | ✓ (mặc định carousel) | ✅ cả 3 (carousel đã test); cải thiện mới chờ native QA |
 | Grouping theo agent (×N badge) / mọi session | ✓ | ✅ |
 | Max rows (1–10), min-state filter, ẩn agent | ✓ | ✅ |
 | Token layout 8 phần (dot/icon/title/project/sep/message/state/elapsed) + 3 preset | ✓ | ✅ + preview sống |
@@ -70,3 +72,19 @@ Trạng thái: ✅ có rồi · 🔧 đang port đợt này · ⏳ để đợt 
 | Multi-agent bubble toggle (off = simple bubble) | ✓ | ✅ |
 | Live preview panel (demo webhook đa agent) | ✓ | ✅ FULL panel (stage + quick scenarios + webhook list + add column, cửa sổ nở 640→1380) |
 | Updater | Sparkle + badge | ✅ Tauri updater |
+
+## Phạm vi port upstream v1.17.0 / v1.17.1
+
+> Các mốc `v1.17.0` / `v1.17.1` ở đây là phạm vi release upstream macOS,
+> không phải Windows package version; bản Windows của fork là `0.1.12`.
+
+| Phạm vi | Windows |
+|---|---|
+| Bubble clipping / giới hạn theo màn hình | ✅ native QA một màn hình 150%, bốn mép; mixed-DPI thật còn chờ |
+| Trạng thái empty sau khi filter/ẩn session | ✅ native QA |
+| Bubble carousel | ✅ native QA list/carousel/compact |
+| Native occlusion / sleep | ⏳ chưa port |
+| Quota-token fallback và macOS Settings fix | ➖ không cam kết hỗ trợ trên Windows |
+
+Hook jcode cài đặt thất bại đóng (không overwrite) khi gặp hook scalar ngoại lai
+hoặc biểu diễn array/table không hỗ trợ trong `~/.jcode/config.toml`.

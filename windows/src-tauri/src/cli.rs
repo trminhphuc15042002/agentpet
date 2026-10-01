@@ -35,6 +35,26 @@ pub fn run_hook(args: &[String]) {
         });
     }
 
+    // jcode describes the event in JCODE_HOOK_* env vars, not on stdin (stdin
+    // is /dev/null). Missing event/session fail-open so the observer never
+    // blocks the agent.
+    if agent == "jcode" {
+        if let Some(j) = parse_jcode_hook(|k| std::env::var(k).ok()) {
+            post_and_exit(Payload {
+                agent,
+                event: j.event,
+                session: j.session,
+                project: j.project,
+                tool: j.tool,
+                model: j.model,
+                terminal_program,
+                terminal_focus_url,
+                ..Payload::default()
+            });
+        }
+        std::process::exit(0);
+    }
+
     // Otherwise decode the JSON the agent pipes on stdin. Field names vary by
     // agent (Claude/Codex/Gemini/Kiro/Copilot, Cursor, Windsurf, Antigravity),
     // so we try each convention.
@@ -285,7 +305,7 @@ fn post_and_exit(p: Payload) -> ! {
 /// Queue dir shared with the app: %LOCALAPPDATA%/AgentPet/queue (config_dir on
 /// other platforms). One JSON line per file, name-ordered by timestamp.
 pub fn queue_dir() -> Option<std::path::PathBuf> {
-    dirs::config_dir().map(|d| d.join("AgentPet").join("queue"))
+    crate::app_config_dir().map(|d| d.join("queue"))
 }
 
 fn queue(p: &Payload) {
@@ -302,6 +322,44 @@ fn now_millis() -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
         .unwrap_or(0)
+}
+
+/// jcode observer payload from env (github.com/1jehuang/jcode, docs/HOOKS.md).
+/// Pure: takes a getter so tests never mutate process env.
+#[derive(Debug, PartialEq, Eq)]
+struct JcodeHook {
+    event: String,
+    session: String,
+    project: String,
+    tool: String,
+    model: String,
+}
+
+fn nonempty_env(s: Option<String>) -> Option<String> {
+    s.filter(|v| !v.is_empty())
+}
+
+fn parse_jcode_hook(get: impl Fn(&str) -> Option<String>) -> Option<JcodeHook> {
+    let event = nonempty_env(get("JCODE_HOOK_EVENT"))?;
+    let session = nonempty_env(get("JCODE_HOOK_SESSION_ID"))?;
+    let mut event = event;
+    // jcode has no "needs input" hook. A turn that ends by asking the user
+    // something is reported as waiting, like Claude's Stop refinement.
+    if event == "turn_end"
+        && get("JCODE_HOOK_STATUS").as_deref() != Some("error")
+        && nonempty_env(get("JCODE_HOOK_LAST_ASSISTANT_TEXT"))
+            .map(|t| crate::transcript::looks_like_question(&t))
+            .unwrap_or(false)
+    {
+        event = "waiting".into();
+    }
+    Some(JcodeHook {
+        event,
+        session,
+        project: nonempty_env(get("JCODE_HOOK_CWD")).unwrap_or_default(),
+        tool: nonempty_env(get("JCODE_HOOK_TOOL_NAME")).unwrap_or_default(),
+        model: nonempty_env(get("JCODE_HOOK_MODEL")).unwrap_or_default(),
+    })
 }
 
 fn flag(args: &[String], name: &str) -> Option<String> {
@@ -430,6 +488,71 @@ mod tests {
     fn project_empty_when_no_field() {
         let v = json!({"conversationId":"c1","stepIdx":0});
         assert_eq!(extract_project(&v), "");
+    }
+
+    fn jcode(pairs: &[(&str, &str)]) -> Option<super::JcodeHook> {
+        super::parse_jcode_hook(|k| {
+            pairs.iter().find(|(n, _)| *n == k).map(|(_, v)| (*v).to_string())
+        })
+    }
+
+    #[test]
+    fn jcode_env_payload_builds_event() {
+        let e = jcode(&[
+            ("JCODE_HOOK_EVENT", "post_tool"),
+            ("JCODE_HOOK_SESSION_ID", "session_x_1"),
+            ("JCODE_HOOK_CWD", "/proj"),
+            ("JCODE_HOOK_TOOL_NAME", "bash"),
+            ("JCODE_HOOK_MODEL", "claude-sonnet"),
+        ]).expect("event");
+        assert_eq!(e.event, "post_tool");
+        assert_eq!(e.session, "session_x_1");
+        assert_eq!(e.project, "/proj");
+        assert_eq!(e.tool, "bash");
+        assert_eq!(e.model, "claude-sonnet");
+    }
+
+    #[test]
+    fn jcode_missing_session_or_event_is_ignored() {
+        assert!(jcode(&[("JCODE_HOOK_EVENT", "turn_end")]).is_none());
+        assert!(jcode(&[("JCODE_HOOK_SESSION_ID", "s")]).is_none());
+        assert!(jcode(&[]).is_none());
+        assert!(jcode(&[("JCODE_HOOK_EVENT", ""), ("JCODE_HOOK_SESSION_ID", "s")]).is_none());
+    }
+
+    #[test]
+    fn jcode_turn_ending_on_question_is_waiting() {
+        let e = jcode(&[
+            ("JCODE_HOOK_EVENT", "turn_end"),
+            ("JCODE_HOOK_SESSION_ID", "s"),
+            ("JCODE_HOOK_STATUS", "ok"),
+            ("JCODE_HOOK_LAST_ASSISTANT_TEXT", "I found two options. Which one should I use?"),
+        ]).expect("event");
+        assert_eq!(e.event, "waiting");
+        assert_eq!(crate::statemap::state("jcode", &e.event), Some("waiting"));
+    }
+
+    #[test]
+    fn jcode_turn_ending_with_summary_is_done() {
+        let e = jcode(&[
+            ("JCODE_HOOK_EVENT", "turn_end"),
+            ("JCODE_HOOK_SESSION_ID", "s"),
+            ("JCODE_HOOK_STATUS", "ok"),
+            ("JCODE_HOOK_LAST_ASSISTANT_TEXT", "Fixed the bug and tests pass."),
+        ]).expect("event");
+        assert_eq!(e.event, "turn_end");
+        assert_eq!(crate::statemap::state("jcode", &e.event), Some("done"));
+    }
+
+    #[test]
+    fn jcode_error_status_is_not_waiting() {
+        let e = jcode(&[
+            ("JCODE_HOOK_EVENT", "turn_end"),
+            ("JCODE_HOOK_SESSION_ID", "s"),
+            ("JCODE_HOOK_STATUS", "error"),
+            ("JCODE_HOOK_LAST_ASSISTANT_TEXT", "Which one should I use?"),
+        ]).expect("event");
+        assert_eq!(e.event, "turn_end");
     }
 }
 

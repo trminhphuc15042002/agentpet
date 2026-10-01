@@ -2,12 +2,13 @@
 
 A desktop pet that floats on your screen and reacts in real time to your AI
 coding agents (Claude Code, Codex, Gemini CLI, Cursor, opencode, Windsurf,
-Antigravity, GitHub Copilot, Kiro CLI). Windows port of the macOS app, built with
+Antigravity, GitHub Copilot, Kiro CLI, Factory Droid, Pi, Grok Build, jcode).
+Windows port of the macOS app, built with
 [Tauri](https://tauri.app) so it stays small (~10 MB) and reuses the same pet
 catalog + hook model.
 
 > Status: feature-complete, builds on CI (`.msi` + NSIS `.exe`). Not yet
-> validated on a real Windows machine, and not code-signed (see
+> validated across mixed-DPI monitors, and not code-signed (see
 > [SmartScreen](#smartscreen-no-code-signing-cert) below).
 
 ## Install
@@ -64,6 +65,9 @@ agent hook  ──(stdin JSON)──►  agentpet.exe hook --agent <kind>
 - The same binary doubles as the hook CLI: `agentpet hook --agent claude` reads
   the agent's hook payload on stdin and POSTs it to the running app. It always
   exits 0 so it never blocks an agent (Copilot PreToolUse is fail-closed).
+- Standard hooks use JSON on stdin. jcode is the deliberate exception: its
+  detached observer supplies `JCODE_HOOK_*` environment variables (stdin is
+  `/dev/null`), and a missing event/session exits without blocking the agent.
 - Hook configs are written to Windows paths (`%USERPROFILE%\.claude\settings.json`,
   `\.codex\hooks.json`, ...) , identical formats to the macOS app.
 - Pets come from the public CDN (`pets.thenightwatcher.online/manifest.json`),
@@ -74,12 +78,14 @@ agent hook  ──(stdin JSON)──►  agentpet.exe hook --agent <kind>
 
 ## Features (parity with macOS)
 
-- 9 agents, same hook formats as macOS.
+- 13 agents, matching the Rust hook catalog.
 - Pet picker (search / random) + "use your own spritesheet".
 - Bubble customization: theme (dark/light/system), opacity, font size/family,
   themed phrases, per-agent custom messages, idle chatter toggle.
 - Multi-agent bubble (shows every active session at once) with a live elapsed
   clock and per-tool live activity text (file being edited, command description).
+- A jcode `turn_end` whose last assistant text is a question is surfaced as
+  `waiting`; error turns are not treated as questions.
 - Live preview in Settings, desktop notifications + chimes, autostart,
   auto-update (Tauri updater, minisign-signed).
 - i18n: English / Tiếng Việt / 简体中文 with a runtime language switcher.
@@ -121,6 +127,43 @@ npm run tauri build    # NSIS installer + MSI in src-tauri/target/release/bundle
 | Antigravity    | `~/.gemini/config/hooks.json`                | no "needs input" alerts |
 | GitHub Copilot | `~/.copilot/hooks/agentpet.json`             | Copilot CLI |
 | Kiro CLI       | `~/.kiro/agents/default.json`                | hooks the default agent |
+| Factory Droid  | `~/.factory/hooks.json`                      | Claude-compatible hooks |
+| Pi             | `~/.pi/agent/extensions/agentpet.ts`         | extension; no needs-input hook |
+| Grok Build     | `~/.grok/hooks/agentpet.json`                | Claude-compatible hooks |
+| jcode          | `~/.jcode/config.toml`                       | observer lifecycle: `session_start`, `turn_start`, `post_tool`, `turn_end`, `session_end`; no blocking `pre_tool` |
+
+The Settings window exposes the per-agent hook install toggle, including jcode.
+jcode installation preserves unrelated TOML; a conflicting existing scalar hook
+or array/table hooks representation fails closed without overwriting the file.
+
+## Upstream parity scope
+
+The `v1.17.0` / `v1.17.1` labels below refer to upstream macOS release scope,
+not the Windows package version. This fork's Windows package is `0.1.12`.
+
+- Bubble clipping/screen bounds, filtered-empty handling, and carousel support
+  are implemented and tested natively on one 2560×1600 display at 150% scale,
+  including genuine grow/shrink, four screen edges, dragging and per-window
+  click-through in split mode. Real mixed-DPI/multi-monitor QA remains pending.
+- Native occlusion/sleep behavior is not ported.
+- The macOS quota-token fallback and macOS Settings fix are not Windows support
+  promises.
+
+### Native regression check (Windows, Node 22+)
+
+```powershell
+cd windows
+cargo test --manifest-path src-tauri/Cargo.toml --lib
+node --experimental-strip-types scripts/check-geometry.ts
+node node_modules/@tauri-apps/cli/tauri.js build --debug --no-bundle --config src-tauri/qa.windows.json
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/native-qa.ps1 -MonitorBoundary
+```
+
+The native check briefly stops/restarts the installed AgentPet to own its hook
+port, uses a separate debug-only profile and verifies real configuration hashes
+remain unchanged. It moves the mouse and opens a temporary click-counter window;
+do not interact with the desktop while it runs. CDP/profile overrides are compiled
+out of release builds. Reports/screenshots are written to the printed output path.
 
 ## Publishing the package manifests
 

@@ -24,18 +24,24 @@ body.overlay, body.overlay * {
   flex-direction: column;
   align-items: center;
   gap: 4px;
+  --pet-offset: 0px;
+  --bubble-shift: 0px;
+  --tail-shift: 0px;
+  --bubble-snug: 0px;
 }
 
 #pet {
   image-rendering: pixelated;
   /* The whole window is draggable via the pet (set in main.ts). */
   cursor: grab;
+  translate: var(--pet-offset, 0px) 0;
 }
 .party-badge {
   position: absolute;
   right: -5px;
   bottom: 12px;
   z-index: 1;
+  translate: var(--pet-offset, 0px) 0;
   min-width: 20px;
   padding: 2px 5px;
   border: 1px solid rgba(255,255,255,.35);
@@ -49,7 +55,7 @@ body.overlay, body.overlay * {
   box-shadow: 0 2px 6px rgba(0,0,0,.28);
   pointer-events: none;
 }
-@keyframes bob { 0%, 100% { translate: 0 0; } 50% { translate: 0 -3px; } }
+@keyframes bob { 0%, 100% { translate: var(--pet-offset, 0px) 0; } 50% { translate: var(--pet-offset, 0px) -3px; } }
 #pet.bob { animation: bob 2.4s ease-in-out infinite; }
 
 .bubble {
@@ -57,7 +63,7 @@ body.overlay, body.overlay * {
   display: flex;
   flex-direction: column;
   gap: 3px;
-  max-width: 260px;
+  max-width: 420px;
   padding: 7px 12px;
   border-radius: 12px;
   background: var(--bubble-bg, rgba(22, 24, 38, 0.92));
@@ -71,6 +77,7 @@ body.overlay, body.overlay * {
   margin-bottom: 6px; /* room for the tail */
   box-shadow: 0 4px 14px rgba(0, 0, 0, 0.32), 0 1px 3px rgba(0, 0, 0, 0.2);
   transition: opacity 0.2s ease;
+  transform: translate(var(--bubble-shift, 0px), var(--bubble-snug, 0px));
 }
 /* Speech-bubble tail pointing down at the pet. */
 .bubble::after {
@@ -78,7 +85,7 @@ body.overlay, body.overlay * {
   position: absolute;
   left: 50%;
   bottom: -6px;
-  transform: translateX(-50%);
+  transform: translateX(calc(-50% + var(--tail-shift, 0px)));
   border: 7px solid transparent;
   border-top: 7px solid var(--bubble-bg, rgba(22, 24, 38, 0.92));
   border-bottom: 0;

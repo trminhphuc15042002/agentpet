@@ -3,7 +3,8 @@ import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { Pet } from "./pet";
 import { SessionStore, aggregateMood, basename, type AgentEventPayload, type SubagentEventPayload } from "./state";
-import { BubbleRenderer } from "./bubble";
+import { BubbleRenderer, groupSessions, readBubbleConfig } from "./bubble";
+import { bubbleLayout, maintenanceSig, shouldSendResize } from "./geometry";
 import { loadCatalog, savedSlug, saveSlug } from "./catalog";
 import { t, setLang, type Lang } from "./i18n";
 import { bubbleLines, PET_CHAT } from "./activity";
@@ -154,6 +155,7 @@ function flashReactive(line: string | null) {
   if (!line) return;
   reactiveLine = line;
   reactiveUntil = Date.now() + 5000;
+  render();
 }
 
 /// Evaluate the care-driven reactive metrics after a feed / meal / hunger tick.
@@ -211,13 +213,17 @@ function render() {
   const reactiveActive = Date.now() < reactiveUntil && !!reactiveLine;
 
   const multi = localStorage.getItem("ap_multi") !== "0";
-  if ((mood === "working" || mood === "waiting") && !multi) {
-    // Simple-bubble mode (mac: multi-agent off) , one plain chat line.
-    if (resolved !== prevSimpleMood) { pickMoodLine(mood); prevSimpleMood = resolved; }
-    if (!moodLine) pickMoodLine(mood);
-    bubble.renderLine(reactiveActive ? reactiveLine : moodLine);
-  } else if (mood === "working" || mood === "waiting") {
-    bubble.render(sessions.filter((s) => s.state !== "idle" && s.state !== "registered"));
+  const activeRows = sessions.filter((s) => s.state !== "idle" && s.state !== "registered");
+  const visibleGroups = multi ? groupSessions(activeRows, readBubbleConfig()) : [];
+  if (mood === "working" || mood === "waiting") {
+    if (multi && visibleGroups.length) {
+      bubble.render(activeRows);
+    } else {
+      // Simple-bubble / personality fallback when multi is off OR filters hide every group.
+      if (resolved !== prevSimpleMood) { pickMoodLine(mood); prevSimpleMood = resolved; }
+      if (!moodLine) pickMoodLine(mood);
+      bubble.renderLine(reactiveActive ? reactiveLine : moodLine);
+    }
   } else if (mood === "celebrate") {
     bubble.renderLine(moodLine || t("Done"));
   } else if (mood === "done") {
@@ -236,29 +242,82 @@ function render() {
   }
 
   snugBubble();
-  reportHitRect();
+  applyBubbleGeometry();
+  hugOverlay();
   // One global tray icon , the main window reports it, counting ALL sessions
   // (not just this window's owned subset).
   if (IS_MAIN) reportTrayStatus(store.active());
 }
-setInterval(render, 500);
-// Hunger decays over time, so evaluate it on a timer (not only after feeding,
-// when the pet is always full) , matching macOS's state-republish trigger.
-setInterval(() => {
-  const slug = myPetSlug();
-  if (slug) flashReactive(reactive.evaluate("hunger", care.hunger(care.stateFor(slug))));
-}, 60_000);
-// Carousel advance / fold clicks request a prompt repaint.
-setInterval(() => { if (bubble.dirty) { bubble.dirty = false; render(); } }, 120);
-// Live elapsed clocks tick every second.
-setInterval(() => bubble.tickClocks(), 1000);
+
+let maintTimer: number | null = null;
+let clockTimer: number | null = null;
+let dirtyTimer: number | null = null;
+let hungerTimer: number | null = null;
+
+function maintain() {
+  const before = maintenanceSig(store.snapshot());
+  store.active();
+  const now = Date.now();
+  const celebrating = now < celebrateUntil;
+  if (wasCelebrating && !celebrating) { render(); return; }
+  if (reactiveLine && now >= reactiveUntil) { reactiveLine = ""; render(); return; }
+  if (maintenanceSig(store.snapshot()) !== before) render();
+}
+
+function startUiTimers() {
+  if (document.hidden) return;
+  if (!maintTimer) maintTimer = window.setInterval(maintain, 500);
+  if (!clockTimer) clockTimer = window.setInterval(() => bubble.tickClocks(), 1000);
+  if (!dirtyTimer) dirtyTimer = window.setInterval(() => {
+    if (bubble.dirty) { bubble.dirty = false; render(); }
+  }, 120);
+  if (!hungerTimer) hungerTimer = window.setInterval(() => {
+    const slug = myPetSlug();
+    if (slug) flashReactive(reactive.evaluate("hunger", care.hunger(care.stateFor(slug))));
+  }, 60_000);
+  bubble.resume();
+}
+
+function stopUiTimers() {
+  if (maintTimer) { clearInterval(maintTimer); maintTimer = null; }
+  if (clockTimer) { clearInterval(clockTimer); clockTimer = null; }
+  if (dirtyTimer) { clearInterval(dirtyTimer); dirtyTimer = null; }
+  if (hungerTimer) { clearInterval(hungerTimer); hungerTimer = null; }
+  bubble.pause();
+}
+
+document.addEventListener("visibilitychange", () => {
+  if (document.hidden) stopUiTimers();
+  else { startUiTimers(); render(); }
+});
+startUiTimers();
 
 // Pull the bubble down over the canvas's empty headroom so it sits right
 // above the pet's head (the sprite rarely fills the whole canvas height).
 function snugBubble() {
   const gap = Math.max(0, canvas.clientHeight * pet.headroom - 4);
-  bubbleEl.style.transform = `translateY(${gap}px)`;
+  petRoot.style.setProperty("--bubble-snug", `${gap}px`);
 }
+
+let windowWidthLogical = 260;
+let petOffsetLogical = 0;
+
+function applyBubbleGeometry() {
+  const bw = bubbleEl.hidden ? 0 : bubbleEl.offsetWidth;
+  const layout = bubbleLayout(petOffsetLogical, windowWidthLogical, bw);
+  petRoot.style.setProperty("--pet-offset", `${petOffsetLogical}px`);
+  petRoot.style.setProperty("--bubble-shift", `${layout.bubbleShift}px`);
+  petRoot.style.setProperty("--tail-shift", `${layout.tailShift}px`);
+}
+
+listen<{ petOffset: number; windowWidth: number }>("pet-geometry", (e) => {
+  if (typeof e.payload?.petOffset === "number") petOffsetLogical = e.payload.petOffset;
+  if (typeof e.payload?.windowWidth === "number" && e.payload.windowWidth > 0) {
+    windowWidthLogical = e.payload.windowWidth;
+  }
+  applyBubbleGeometry();
+  reportHitRect();
+});
 
 // Tray tooltip mirrors the macOS menu bar count (N working / N waiting).
 let lastTray = "";
@@ -467,8 +526,68 @@ bubbleEl.addEventListener("contextmenu", (e) => {
 // canvas, so the empty space beside the pet passes clicks to apps below.
 const petRoot = document.getElementById("pet-root") as HTMLElement;
 let lastHitSig = "";
-function reportHitRect() {
-  const d = window.devicePixelRatio || 1;
+
+const RESIZE_TOL = 1;
+let lastApplied = { w: 260, h: 320 };
+let resizeInflight = false;
+let resizeQueued: { w: number; h: number } | null = null;
+let shrinkTimer: number | null = null;
+
+function paddedSize(w: number, h: number) {
+  return { w: w + 4, h: h + 4 };
+}
+
+function viewportSize() {
+  return { w: window.innerWidth, h: window.innerHeight };
+}
+
+async function sendResize(size: { w: number; h: number }) {
+  resizeQueued = size;
+  if (resizeInflight) return;
+  resizeInflight = true;
+  try {
+    while (resizeQueued) {
+      const next = resizeQueued;
+      resizeQueued = null;
+      const actual = viewportSize();
+      if (!shouldSendResize(next, actual, RESIZE_TOL)) continue;
+      try {
+        const result = await invoke<{ petOffset: number; windowWidth: number }>("resize_pet_window", {
+          width: next.w,
+          height: next.h,
+          petWidth: canvas.offsetWidth || 160,
+        });
+        lastApplied = next;
+        petOffsetLogical = result.petOffset;
+        windowWidthLogical = result.windowWidth;
+        applyBubbleGeometry();
+        reportHitRect();
+      } catch (err) {
+        invoke("log_debug", { msg: `resize_pet_window failed: ${err}` }).catch(() => {});
+      }
+    }
+  } finally {
+    resizeInflight = false;
+    if (resizeQueued) void sendResize(resizeQueued);
+  }
+}
+
+function onContentSize(w: number, h: number) {
+  if (w <= 0 || h <= 0) return;
+  const target = paddedSize(w, h);
+  const actual = viewportSize();
+  const grow = {
+    w: Math.max(target.w, lastApplied.w, actual.w),
+    h: Math.max(target.h, lastApplied.h, actual.h),
+  };
+  if (grow.w > actual.w + RESIZE_TOL || grow.h > actual.h + RESIZE_TOL) {
+    void sendResize(grow);
+  }
+  if (shrinkTimer) clearTimeout(shrinkTimer);
+  shrinkTimer = window.setTimeout(() => { void sendResize(target); }, 50);
+}
+
+function overlayUnion() {
   const rects: { left: number; top: number; right: number; bottom: number }[] = [];
   if (!bubbleEl.hidden) {
     const b = bubbleEl.getBoundingClientRect();
@@ -489,21 +608,36 @@ function reportHitRect() {
       right: cr.left + (sr.x + sr.w) * kx,
       bottom: cr.top + (sr.y + sr.h) * ky,
     });
-  } else {
+  } else if (cr.width > 0) {
     rects.push({ left: cr.left, top: cr.top, right: cr.right, bottom: cr.bottom });
   }
+  if (!rects.length) return null;
   const left = Math.min(...rects.map((r) => r.left));
   const top = Math.min(...rects.map((r) => r.top));
   const right = Math.max(...rects.map((r) => r.right));
   const bottom = Math.max(...rects.map((r) => r.bottom));
-  const sig = [left, top, right, bottom].map((v) => Math.round(v)).join(",");
+  return { left, top, right, bottom, w: right - left, h: bottom - top };
+}
+
+function reportHitRect() {
+  const d = window.devicePixelRatio || 1;
+  const u = overlayUnion();
+  if (!u) return;
+  const sig = `${d}:` + [u.left, u.top, u.right, u.bottom].map((v) => Math.round(v)).join(",");
   if (sig === lastHitSig) return;
   lastHitSig = sig;
-  invoke("set_hit_rect", { x: left * d, y: top * d, w: (right - left) * d, h: (bottom - top) * d })
+  invoke("set_hit_rect", { x: u.left * d, y: u.top * d, w: u.w * d, h: u.h * d })
     .catch((err) => invoke("log_debug", { msg: `set_hit_rect failed: ${err}` }).catch(() => {}));
 }
-new ResizeObserver(reportHitRect).observe(petRoot);
-window.addEventListener("resize", reportHitRect);
-reportHitRect();
+
+function hugOverlay() {
+  const u = overlayUnion();
+  if (u && u.w > 0 && u.h > 0) onContentSize(u.w, u.h);
+  reportHitRect();
+}
+
+new ResizeObserver(() => { hugOverlay(); }).observe(petRoot);
+window.addEventListener("resize", hugOverlay);
+hugOverlay();
 
 render();

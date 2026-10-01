@@ -1,14 +1,17 @@
 pub mod cli;
+pub mod geometry;
 pub mod hooks;
 pub mod server;
 pub mod statemap;
 pub mod transcript;
 
-use std::sync::Mutex;
+use std::collections::HashMap;
+use std::path::PathBuf;
+use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 use tauri::menu::{Menu, MenuItem};
 use tauri::tray::TrayIconBuilder;
-use tauri::{Emitter, Manager, PhysicalPosition, WebviewUrl, WebviewWindowBuilder};
+use tauri::{Emitter, LogicalSize, Manager, PhysicalPosition, WebviewUrl, WebviewWindowBuilder};
 
 /// Tray menu items kept around so the language switcher can re-label them live.
 struct TrayItems {
@@ -22,7 +25,7 @@ struct TrayItems {
 /// The pet's opaque region in physical pixels, relative to the window's top-left.
 /// The frontend reports this (canvas + visible bubble) so the background thread
 /// can make the transparent rest of the window click-through.
-#[derive(Default)]
+#[derive(Default, Clone, Copy)]
 #[cfg_attr(not(windows), allow(dead_code))]
 struct HitRect {
     x: f64,
@@ -31,10 +34,108 @@ struct HitRect {
     h: f64,
 }
 
+#[derive(Default)]
+struct PetWinState {
+    hit: HitRect,
+    last_w: f64,
+    last_h: f64,
+    pet_width: f64,
+    /// In-window pet shift, logical CSS px (returned to the webview).
+    pet_offset: f64,
+    /// Physical bottom-center of the pet; stable across resizes.
+    anchor: Option<(f64, f64)>,
+    last_origin: Option<(i32, i32)>,
+    last_saved: Option<(i32, i32)>,
+}
+
+type PetWinMap = Mutex<HashMap<String, PetWinState>>;
+
+fn is_pet_label(label: &str) -> bool {
+    label == "pet" || label.starts_with("pet-")
+}
+
+fn qa_profile_root() -> Option<PathBuf> {
+    #[cfg(debug_assertions)]
+    {
+        let raw = std::env::var("AGENTPET_QA_PROFILE").ok()?;
+        if raw.is_empty() {
+            return None;
+        }
+        Some(PathBuf::from(raw))
+    }
+    #[cfg(not(debug_assertions))]
+    {
+        None
+    }
+}
+
+pub(crate) fn app_config_dir() -> Option<PathBuf> {
+    if let Some(root) = qa_profile_root() {
+        return Some(root.join("AgentPet"));
+    }
+    dirs::config_dir().map(|d| d.join("AgentPet"))
+}
+
+fn webview_browser_args() -> Option<String> {
+    #[cfg(not(debug_assertions))]
+    {
+        return None;
+    }
+    #[cfg(debug_assertions)]
+    {
+        let raw = std::env::var("AGENTPET_CDP_PORT").ok()?;
+        let port: u32 = raw.parse().ok()?;
+        if !(1..=65535).contains(&port) {
+            return None;
+        }
+        Some(format!(
+            "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection --remote-debugging-port={port} --remote-allow-origins=http://127.0.0.1:{port}"
+        ))
+    }
+}
+
+fn decorate_webview<R: tauri::Runtime, M: tauri::Manager<R>>(
+    mut builder: WebviewWindowBuilder<R, M>,
+) -> WebviewWindowBuilder<R, M> {
+    if let Some(args) = webview_browser_args() {
+        builder = builder.additional_browser_args(&args);
+    }
+    if let Some(root) = qa_profile_root() {
+        builder = builder.data_directory(root.join("WebView2"));
+    }
+    builder
+}
+
+fn primary_mouse_down() -> bool {
+    #[cfg(windows)]
+    {
+        #[link(name = "user32")]
+        extern "system" {
+            fn GetAsyncKeyState(v_key: i32) -> i16;
+        }
+        const VK_LBUTTON: i32 = 0x01;
+        unsafe { GetAsyncKeyState(VK_LBUTTON) as u16 & 0x8000 != 0 }
+    }
+    #[cfg(not(windows))]
+    {
+        false
+    }
+}
+
+fn split_wanted() -> &'static Mutex<Option<Vec<String>>> {
+    static W: OnceLock<Mutex<Option<Vec<String>>>> = OnceLock::new();
+    W.get_or_init(|| Mutex::new(None))
+}
+
+fn split_worker_running() -> &'static Mutex<bool> {
+    static R: OnceLock<Mutex<bool>> = OnceLock::new();
+    R.get_or_init(|| Mutex::new(false))
+}
+
 /// Append a line to %APPDATA%/AgentPet/debug.log , lightweight field
 /// diagnostics for the Windows build (no console there).
 pub(crate) fn dlog(msg: &str) {
-    if let Some(p) = dirs::config_dir().map(|d| d.join("AgentPet").join("debug.log")) {
+    if let Some(p) = app_config_dir().map(|d| d.join("debug.log")) {
         if let Some(dir) = p.parent() {
             let _ = std::fs::create_dir_all(dir);
         }
@@ -55,37 +156,262 @@ fn log_debug(msg: String) {
 }
 
 fn pos_file() -> Option<std::path::PathBuf> {
-    dirs::config_dir().map(|d| d.join("AgentPet").join("pos"))
+    app_config_dir().map(|d| d.join("pos"))
 }
 
-fn read_pos() -> Option<(i32, i32)> {
+fn read_anchor(win: &tauri::WebviewWindow) -> Option<(f64, f64)> {
     let s = std::fs::read_to_string(pos_file()?).ok()?;
-    let (a, b) = s.trim().split_once(',')?;
-    Some((a.trim().parse().ok()?, b.trim().parse().ok()?))
+    let pos = geometry::parse_saved_pos(&s)?;
+    let mons = collect_monitors(win);
+    let fallback = win.scale_factor().unwrap_or(1.0);
+    Some(geometry::saved_anchor_on_monitors(pos, &mons, fallback))
 }
 
-fn write_pos(x: i32, y: i32) {
+fn write_anchor(x: f64, y: f64) {
     if let Some(p) = pos_file() {
         if let Some(d) = p.parent() {
             let _ = std::fs::create_dir_all(d);
         }
-        let _ = std::fs::write(p, format!("{x},{y}"));
+        let _ = std::fs::write(p, geometry::format_anchor(x, y));
     }
 }
 
 /// Report the pet's opaque rectangle (physical px, window-relative) so empty
 /// transparent areas of the overlay let clicks pass through to apps below.
+/// Async commands keep the UI thread free: the geometry worker can hold this
+/// mutex while waiting for a native window operation on that thread.
 #[tauri::command]
-fn set_hit_rect(app: tauri::AppHandle, x: f64, y: f64, w: f64, h: f64) {
-    if let Some(state) = app.try_state::<Mutex<HitRect>>() {
-        if let Ok(mut r) = state.lock() {
-            *r = HitRect { x, y, w, h };
+async fn set_hit_rect(window: tauri::WebviewWindow, app: tauri::AppHandle, x: f64, y: f64, w: f64, h: f64) {
+    let label = window.label().to_string();
+    if let Some(state) = app.try_state::<PetWinMap>() {
+        if let Ok(mut map) = state.lock() {
+            map.entry(label).or_default().hit = HitRect { x, y, w, h };
         }
     }
 }
 
+#[derive(serde::Serialize)]
+struct ResizeReply {
+    #[serde(rename = "petOffset")]
+    pet_offset: f64,
+    #[serde(rename = "windowWidth")]
+    window_width: f64,
+}
+
+fn collect_monitors(win: &tauri::WebviewWindow) -> Vec<geometry::MonitorGeom> {
+    win.available_monitors()
+        .unwrap_or_default()
+        .into_iter()
+        .map(|m| {
+            let p = m.position();
+            let s = m.size();
+            let wa = m.work_area();
+            geometry::MonitorGeom {
+                frame: geometry::VisibleRect::from_pos_size(
+                    p.x as f64,
+                    p.y as f64,
+                    s.width as f64,
+                    s.height as f64,
+                ),
+                work: geometry::VisibleRect::from_pos_size(
+                    wa.position.x as f64,
+                    wa.position.y as f64,
+                    wa.size.width as f64,
+                    wa.size.height as f64,
+                ),
+                scale: m.scale_factor(),
+            }
+        })
+        .collect()
+}
+
+fn frame_physical(win: &tauri::WebviewWindow) -> Option<(f64, f64, f64, f64)> {
+    let pos = win.outer_position().ok()?;
+    let size = win.outer_size().ok()?;
+    Some((pos.x as f64, pos.y as f64, size.width as f64, size.height as f64))
+}
+
+fn refresh_drag_anchor(win: &tauri::WebviewWindow, st: &mut PetWinState) {
+    if let Some((x, y, w, h)) = frame_physical(win) {
+        let origin = (x as i32, y as i32);
+        // Don't recapture rounded programmatic coordinates on every resize:
+        // repeated half-pixel rounding would slowly move the pet at 150% DPI.
+        if st.anchor.is_none() || st.last_origin != Some(origin) {
+            let scale = win.scale_factor().unwrap_or(1.0);
+            st.anchor = Some(geometry::anchor_from_frame(x, y, w, h, st.pet_offset * scale));
+        }
+        st.last_origin = Some(origin);
+    }
+}
+
+fn pick_work_area(
+    win: &tauri::WebviewWindow,
+    anchor_x: f64,
+    anchor_y: f64,
+) -> Option<geometry::VisibleRect> {
+    let mons = collect_monitors(win);
+    let (cx, cy) = frame_physical(win)
+        .map(|(x, y, w, h)| (x + w / 2.0, y + h / 2.0))
+        .unwrap_or((anchor_x, anchor_y));
+    let idx = geometry::monitor_containing_pet(anchor_x, anchor_y, cx, cy, &mons)
+        .or_else(|| if mons.is_empty() { None } else { Some(0) })?;
+    Some(mons[idx].work)
+}
+
+fn apply_window_layout(
+    win: &tauri::WebviewWindow,
+    st: &mut PetWinState,
+    logical_w: f64,
+    logical_h: f64,
+    pet_width_logical: f64,
+) -> ResizeReply {
+    let scale = win.scale_factor().unwrap_or(1.0);
+    let phys_w = geometry::logical_to_physical(logical_w, scale).round();
+    let phys_h = geometry::logical_to_physical(logical_h, scale).round();
+    let pet_w = geometry::logical_to_physical(pet_width_logical.max(1.0), scale);
+    refresh_drag_anchor(win, st);
+    let (ax, ay) = st.anchor.unwrap_or((0.0, 0.0));
+    let visible = pick_work_area(win, ax, ay)
+        .unwrap_or(geometry::VisibleRect::from_pos_size(0.0, 0.0, phys_w, phys_h));
+    let layout = geometry::layout_window(ax, ay, phys_w, phys_h, pet_w, visible);
+    let _ = win.set_position(PhysicalPosition::new(
+        layout.origin_x.round() as i32,
+        layout.origin_y.round() as i32,
+    ));
+    let _ = win.set_size(LogicalSize::new(logical_w, logical_h));
+    st.last_w = logical_w;
+    st.last_h = logical_h;
+    st.pet_width = pet_width_logical;
+    st.last_origin = Some((layout.origin_x.round() as i32, layout.origin_y.round() as i32));
+    st.pet_offset = geometry::physical_to_logical(layout.pet_offset + layout.origin_x - layout.origin_x.round(), scale);
+    st.anchor = Some(geometry::anchor_from_frame(
+        layout.origin_x,
+        layout.origin_y,
+        phys_w,
+        phys_h,
+        layout.pet_offset,
+    ));
+    ResizeReply {
+        pet_offset: st.pet_offset,
+        window_width: logical_w,
+    }
+}
+
+fn emit_pet_geometry(win: &tauri::WebviewWindow, st: &PetWinState) {
+    let _ = win.emit(
+        "pet-geometry",
+        serde_json::json!({
+            "petOffset": st.pet_offset,
+            "windowWidth": st.last_w,
+        }),
+    );
+}
+
+fn ensure_on_screen(win: &tauri::WebviewWindow, st: &mut PetWinState) {
+    let Some((ox, oy, w, h)) = frame_physical(win) else { return };
+    let scale = win.scale_factor().unwrap_or(1.0);
+    let pet_off = geometry::logical_to_physical(st.pet_offset, scale);
+    refresh_drag_anchor(win, st);
+    let (ax, ay) = st.anchor.unwrap_or_else(|| geometry::anchor_from_frame(ox, oy, w, h, pet_off));
+    if primary_mouse_down() {
+        return;
+    }
+    let mons = collect_monitors(win);
+    let (cx, cy) = (ox + w / 2.0, oy + h / 2.0);
+    let Some(idx) = geometry::monitor_containing_pet(ax, ay, cx, cy, &mons)
+        .or_else(|| if mons.is_empty() { None } else { Some(0) })
+    else {
+        return;
+    };
+    let work = mons[idx].work;
+    let oversized = w > (work.max_x - work.min_x) + 0.5 || h > (work.max_y - work.min_y) + 0.5;
+    if !geometry::frame_outside_work(ox, oy, w, h, work) && !oversized {
+        return;
+    }
+    let pet_w = if st.pet_width > 0.0 {
+        geometry::logical_to_physical(st.pet_width, scale)
+    } else {
+        pet_off.abs() * 2.0 + 1.0
+    };
+    let layout = geometry::layout_from_live_frame(ox, oy, w, h, pet_off, pet_w.max(1.0), work);
+    if (layout.origin_x - ox).abs() < 0.5 && (layout.origin_y - oy).abs() < 0.5 {
+        st.pet_offset = geometry::physical_to_logical(layout.pet_offset, scale);
+        return;
+    }
+    let _ = win.set_position(PhysicalPosition::new(
+        layout.origin_x.round() as i32,
+        layout.origin_y.round() as i32,
+    ));
+    st.last_origin = Some((layout.origin_x.round() as i32, layout.origin_y.round() as i32));
+    st.pet_offset = geometry::physical_to_logical(layout.pet_offset, scale);
+    st.anchor = Some(geometry::anchor_from_frame(
+        layout.origin_x,
+        layout.origin_y,
+        w,
+        h,
+        layout.pet_offset,
+    ));
+    if st.last_w <= 0.0 {
+        st.last_w = geometry::physical_to_logical(w, scale);
+    }
+    emit_pet_geometry(win, st);
+}
+
+/// Calling-window resize: hug content, keep the pet's bottom-center on the
+/// monitor it already occupies, clamp to that display's work area / DPI.
+#[tauri::command]
+async fn resize_pet_window(
+    window: tauri::WebviewWindow,
+    app: tauri::AppHandle,
+    width: f64,
+    height: f64,
+    pet_width: f64,
+) -> Result<ResizeReply, String> {
+    if !(width.is_finite() && height.is_finite() && width > 0.0 && height > 0.0) {
+        return Err("invalid size".into());
+    }
+    // Commit position, size and anchor together on the UI thread; otherwise a
+    // second resize can mistake a half-applied frame for a user drag.
+    let (tx, rx) = std::sync::mpsc::channel();
+    let target = window.clone();
+    window.run_on_main_thread(move || {
+        let result = resize_pet_window_impl(&target, &app, width, height, pet_width);
+        let _ = tx.send(result);
+    }).map_err(|e| e.to_string())?;
+    tauri::async_runtime::spawn_blocking(move || {
+        rx.recv_timeout(Duration::from_secs(5)).map_err(|e| e.to_string())?
+    }).await.map_err(|e| e.to_string())?
+}
+
+fn resize_pet_window_impl(
+    window: &tauri::WebviewWindow,
+    app: &tauri::AppHandle,
+    width: f64,
+    height: f64,
+    pet_width: f64,
+) -> Result<ResizeReply, String> {
+    let pet_w = if pet_width.is_finite() && pet_width > 0.0 { pet_width } else { 160.0 };
+    let label = window.label().to_string();
+    let Some(state) = app.try_state::<PetWinMap>() else {
+        return Err("no window state".into());
+    };
+    let mut map = state.lock().map_err(|e| e.to_string())?;
+    let st = map.entry(label).or_default();
+    let scale = window.scale_factor().unwrap_or(1.0);
+    let matches_viewport = window.inner_size().map(|size| {
+        !geometry::size_changed(width, height, size.width as f64 / scale, size.height as f64 / scale, 1.0)
+    }).unwrap_or(false);
+    if matches_viewport && st.last_w > 0.0 && !geometry::size_changed(width, height, st.last_w, st.last_h, 1.0) {
+        return Ok(ResizeReply {
+            pet_offset: st.pet_offset,
+            window_width: st.last_w,
+        });
+    }
+    Ok(apply_window_layout(window, st, width, height, pet_w))
+}
+
 fn lang_file() -> Option<std::path::PathBuf> {
-    dirs::config_dir().map(|d| d.join("AgentPet").join("lang"))
+    app_config_dir().map(|d| d.join("lang"))
 }
 
 fn read_lang() -> String {
@@ -143,11 +469,13 @@ fn open_settings_impl(app: tauri::AppHandle) {
             let _ = w.set_focus();
             return;
         }
-        match WebviewWindowBuilder::new(&app, "settings", WebviewUrl::App("settings.html".into()))
-            .title("AgentPet")
-            .inner_size(640.0, 620.0)
-            .resizable(false)
-            .build()
+        match decorate_webview(
+            WebviewWindowBuilder::new(&app, "settings", WebviewUrl::App("settings.html".into()))
+                .title("AgentPet")
+                .inner_size(640.0, 620.0)
+                .resizable(false),
+        )
+        .build()
         {
             Ok(_) => dlog("open_settings: window created"),
             Err(e) => dlog(&format!("open_settings: BUILD FAILED: {e}")),
@@ -295,8 +623,7 @@ fn resolve_approval(id: String, decision: String) {
 /// with a `?project=<id>` query so its script shows only that project. Closing
 /// happens for any `pet-*` window no longer in the list (merge back). With split
 /// off, the frontend calls this with an empty list, so all extras close.
-#[tauri::command]
-fn sync_project_windows(app: tauri::AppHandle, projects: Vec<String>) {
+fn apply_split_windows(app: &tauri::AppHandle, projects: &[String]) {
     use std::collections::HashSet;
     let want: HashSet<String> = projects.iter().map(|id| format!("pet-{id}")).collect();
     for (label, win) in app.webview_windows() {
@@ -310,19 +637,52 @@ fn sync_project_windows(app: tauri::AppHandle, projects: Vec<String>) {
             continue;
         }
         let url = format!("index.html?project={id}");
-        let _ = WebviewWindowBuilder::new(&app, &label, WebviewUrl::App(url.into()))
-            .title("AgentPet")
-            .inner_size(260.0, 320.0)
-            .position(1200.0 - (i as f64 + 1.0) * 60.0, 600.0)
-            .transparent(true)
-            .decorations(false)
-            .always_on_top(true)
-            .skip_taskbar(true)
-            .resizable(false)
-            .shadow(false)
-            .focused(false)
-            .build();
+        match decorate_webview(
+            WebviewWindowBuilder::new(app, &label, WebviewUrl::App(url.into()))
+                .title("AgentPet")
+                .inner_size(260.0, 320.0)
+                .position(1200.0 - (i as f64 + 1.0) * 60.0, 600.0)
+                .transparent(true)
+                .decorations(false)
+                .always_on_top(true)
+                .skip_taskbar(true)
+                .resizable(false)
+                .shadow(false)
+                .focused(false),
+        )
+        .build()
+        {
+            Ok(_) => dlog(&format!("sync_project_windows: created {label}")),
+            Err(e) => dlog(&format!("sync_project_windows: BUILD FAILED {label}: {e}")),
+        }
     }
+}
+
+#[tauri::command]
+fn sync_project_windows(app: tauri::AppHandle, projects: Vec<String>) {
+    if let Ok(mut want) = split_wanted().lock() {
+        *want = Some(projects);
+    }
+    {
+        let mut running = match split_worker_running().lock() {
+            Ok(g) => g,
+            Err(_) => return,
+        };
+        if *running {
+            return;
+        }
+        *running = true;
+    }
+    std::thread::spawn(move || loop {
+        let batch = split_wanted().lock().ok().and_then(|mut g| g.take());
+        let Some(projects) = batch else {
+            if let Ok(mut running) = split_worker_running().lock() {
+                *running = false;
+            }
+            break;
+        };
+        apply_split_windows(&app, &projects);
+    });
 }
 
 /// Persist the chosen language (for the tray on next launch) and re-label the
@@ -371,17 +731,19 @@ fn show_popover(app: &tauri::AppHandle) {
     let win = match app.get_webview_window("popover") {
         Some(w) => w,
         None => {
-            match WebviewWindowBuilder::new(app, "popover", WebviewUrl::App("popover.html".into()))
-                .title("AgentPet")
-                .inner_size(300.0, 430.0)
-                .decorations(false)
-                .transparent(true)
-                .always_on_top(true)
-                .skip_taskbar(true)
-                .resizable(false)
-                .focused(true)
-                .visible(false)
-                .build()
+            match decorate_webview(
+                WebviewWindowBuilder::new(app, "popover", WebviewUrl::App("popover.html".into()))
+                    .title("AgentPet")
+                    .inner_size(300.0, 430.0)
+                    .decorations(false)
+                    .transparent(true)
+                    .always_on_top(true)
+                    .skip_taskbar(true)
+                    .resizable(false)
+                    .focused(true)
+                    .visible(false),
+            )
+            .build()
             {
                 Ok(w) => {
                     dlog("popover: window created");
@@ -443,7 +805,7 @@ fn set_pet_visible(app: tauri::AppHandle, visible: bool) {
             let _ = win.hide();
         }
     }
-    if let Some(p) = dirs::config_dir().map(|d| d.join("AgentPet").join("petvisible")) {
+    if let Some(p) = app_config_dir().map(|d| d.join("petvisible")) {
         let _ = std::fs::write(p, if visible { "1" } else { "0" });
     }
     if let Some(items) = app.try_state::<Mutex<TrayItems>>() {
@@ -486,38 +848,77 @@ pub fn run() {
             get_pet_visible,
             open_popover,
             log_debug,
-            set_hit_rect
+            set_hit_rect,
+            resize_pet_window
         ])
         .setup(|app| {
             server::start(app.handle().clone());
-            app.manage(Mutex::new(HitRect::default()));
+            app.manage(Mutex::new(HashMap::<String, PetWinState>::new()));
 
-            // Restore where the user last dragged the pet. First run (no saved
-            // position) parks it near the bottom-right of the primary screen;
-            // the LogicalPosition keeps it on-screen on smaller/HiDPI displays.
+            dlog(&format!("cdp args={:?}", webview_browser_args()));
+            if app.get_webview_window("pet").is_none() {
+                let built = decorate_webview(
+                    WebviewWindowBuilder::new(app.handle(), "pet", WebviewUrl::App("index.html".into()))
+                        .title("AgentPet")
+                        .inner_size(260.0, 320.0)
+                        .position(1200.0, 600.0)
+                        .transparent(true)
+                        .decorations(false)
+                        .always_on_top(true)
+                        .skip_taskbar(true)
+                        .resizable(false)
+                        .shadow(false)
+                        .focused(false),
+                )
+                .build();
+                match built {
+                    Ok(_) => dlog("pet window created"),
+                    Err(e) => dlog(&format!("pet window BUILD FAILED: {e}")),
+                }
+            }
+
+            // Restore the pet's bottom-center anchor. First run (no saved
+            // position) parks it near the bottom-right of the primary work area.
             if let Some(win) = app.get_webview_window("pet") {
-                // Only restore a saved position that still lands on a monitor
-                // (displays may have been unplugged/rearranged since last run).
-                let on_screen = |x: i32, y: i32| {
+                let on_screen = |x: f64, y: f64| {
                     win.available_monitors().map_or(false, |mons| {
                         mons.iter().any(|m| {
                             let p = m.position();
                             let s = m.size();
-                            x >= p.x
-                                && x < p.x + s.width as i32
-                                && y >= p.y
-                                && y < p.y + s.height as i32
+                            x >= p.x as f64
+                                && x < p.x as f64 + s.width as f64
+                                && y >= p.y as f64
+                                && y < p.y as f64 + s.height as f64
                         })
                     })
                 };
-                if let Some((px, py)) = read_pos().filter(|&(x, y)| on_screen(x, y)) {
-                    let _ = win.set_position(PhysicalPosition::new(px, py));
+                if let Some((ax, ay)) = read_anchor(&win).filter(|&(x, y)| on_screen(x, y)) {
+                    if let Some(state) = app.try_state::<PetWinMap>() {
+                        if let Ok(mut map) = state.lock() {
+                            let st = map.entry("pet".into()).or_default();
+                            st.anchor = Some((ax, ay));
+                            st.last_origin = win.outer_position().ok().map(|p| (p.x, p.y));
+                            apply_window_layout(&win, st, 260.0, 320.0, 160.0);
+                        }
+                    }
                 } else if let Ok(Some(mon)) = win.primary_monitor() {
+                    let wa = mon.work_area();
                     let s = mon.scale_factor();
-                    let sz = mon.size();
-                    let x = (sz.width as f64 / s) - 260.0 - 40.0;
-                    let y = (sz.height as f64 / s) - 320.0 - 70.0;
-                    let _ = win.set_position(tauri::LogicalPosition::new(x.max(0.0), y.max(0.0)));
+                    let w = 260.0 * s;
+                    let h = 320.0 * s;
+                    let x = (wa.position.x as f64 + wa.size.width as f64 - w - 40.0 * s)
+                        .max(wa.position.x as f64);
+                    let y = (wa.position.y as f64 + wa.size.height as f64 - h - 70.0 * s)
+                        .max(wa.position.y as f64);
+                    let _ = win.set_position(PhysicalPosition::new(x.round() as i32, y.round() as i32));
+                    if let Some(state) = app.try_state::<PetWinMap>() {
+                        if let Ok(mut map) = state.lock() {
+                            let st = map.entry("pet".into()).or_default();
+                            st.anchor = Some(geometry::anchor_from_frame(x, y, w, h, 0.0));
+                            st.last_w = 260.0;
+                            st.last_h = 320.0;
+                        }
+                    }
                 }
             }
 
@@ -527,18 +928,22 @@ pub fn run() {
             // (2) persist the pet's position so it survives a restart.
             let handle = app.handle().clone();
             std::thread::spawn(move || {
-                let mut last_ignore: Option<bool> = None;
+                let mut last_ignore: HashMap<String, bool> = HashMap::new();
                 let mut last_popover: Option<bool> = None;
                 let mut flip_logs: u32 = 0;
-                let mut last_saved = read_pos();
                 let mut tick: u32 = 0;
                 loop {
                     std::thread::sleep(Duration::from_millis(30));
-                    let Some(win) = handle.get_webview_window("pet") else {
+                    let pets: Vec<(String, tauri::WebviewWindow)> = handle
+                        .webview_windows()
+                        .into_iter()
+                        .filter(|(label, _)| is_pet_label(label))
+                        .collect();
+                    if pets.is_empty() {
                         continue;
-                    };
+                    }
 
-                    // While the popover is open, drop the pet's topmost flag so
+                    // While the popover is open, drop every pet's topmost flag so
                     // the popover (also topmost) is drawn above it. Creation/
                     // show-time topmost on the popover was not enough: the pet,
                     // being topmost too, still covered the card. Restored as soon
@@ -548,7 +953,9 @@ pub fn run() {
                         .and_then(|p| p.is_visible().ok())
                         .unwrap_or(false);
                     if Some(popover_open) != last_popover {
-                        let _ = win.set_always_on_top(!popover_open);
+                        for (_, win) in &pets {
+                            let _ = win.set_always_on_top(!popover_open);
+                        }
                         last_popover = Some(popover_open);
                     }
 
@@ -556,51 +963,70 @@ pub fn run() {
                     // Fail-safe: while the hit rect is unknown (webview still
                     // booting) or the cursor can't be read, keep the window
                     // INTERACTIVE , a clickable pet beats an untouchable one.
-                    match (handle.cursor_position(), win.outer_position()) {
-                        (Ok(cur), Ok(wp)) => {
-                            let rect = handle
-                                .try_state::<Mutex<HitRect>>()
-                                .and_then(|s| s.lock().ok().map(|r| (r.x, r.y, r.w, r.h)));
-                            let inside = match rect {
-                                Some((x, y, w, h)) if w > 0.0 => {
-                                    let rx = cur.x - wp.x as f64;
-                                    let ry = cur.y - wp.y as f64;
-                                    rx >= x && rx <= x + w && ry >= y && ry <= y + h
-                                }
-                                _ => true, // no rect yet , stay interactive
-                            };
-                            // ignore_cursor_events = true -> clicks pass through.
-                            let ignore = !inside;
-                            if Some(ignore) != last_ignore {
-                                let _ = win.set_ignore_cursor_events(ignore);
-                                last_ignore = Some(ignore);
-                                if flip_logs < 30 {
-                                    flip_logs += 1;
-                                    dlog(&format!(
-                                        "hit flip: ignore={ignore} cur=({:.0},{:.0}) win=({},{}) rect={:?}",
-                                        cur.x, cur.y, wp.x, wp.y, rect
-                                    ));
+                    let cursor = handle.cursor_position();
+                    for (label, win) in &pets {
+                        match (cursor.as_ref(), win.outer_position()) {
+                            (Ok(cur), Ok(wp)) => {
+                                let rect = handle.try_state::<PetWinMap>().and_then(|s| {
+                                    s.lock().ok().and_then(|m| {
+                                        m.get(label).map(|st| (st.hit.x, st.hit.y, st.hit.w, st.hit.h))
+                                    })
+                                });
+                                let inside = match rect {
+                                    Some((x, y, w, h)) if w > 0.0 => {
+                                        let rx = cur.x - wp.x as f64;
+                                        let ry = cur.y - wp.y as f64;
+                                        rx >= x && rx <= x + w && ry >= y && ry <= y + h
+                                    }
+                                    _ => true, // no rect yet , stay interactive
+                                };
+                                // ignore_cursor_events = true -> clicks pass through.
+                                let ignore = !inside;
+                                if last_ignore.get(label).copied() != Some(ignore) {
+                                    let _ = win.set_ignore_cursor_events(ignore);
+                                    last_ignore.insert(label.clone(), ignore);
+                                    if flip_logs < 30 {
+                                        flip_logs += 1;
+                                        dlog(&format!(
+                                            "hit flip {label}: ignore={ignore} cur=({:.0},{:.0}) win=({},{}) rect={:?}",
+                                            cur.x, cur.y, wp.x, wp.y, rect
+                                        ));
+                                    }
                                 }
                             }
-                        }
-                        (Err(e), _) => {
-                            if last_ignore != Some(false) {
-                                dlog(&format!("cursor_position error: {e} , forcing interactive"));
-                                let _ = win.set_ignore_cursor_events(false);
-                                last_ignore = Some(false);
+                            (Err(e), _) => {
+                                if last_ignore.get(label).copied() != Some(false) {
+                                    dlog(&format!("cursor_position error: {e} , forcing interactive"));
+                                    let _ = win.set_ignore_cursor_events(false);
+                                    last_ignore.insert(label.clone(), false);
+                                }
                             }
+                            _ => {}
                         }
-                        _ => {}
                     }
 
                     tick = tick.wrapping_add(1);
                     if tick % 33 == 0 {
-                        if let Ok(p) = win.outer_position() {
-                            if last_saved != Some((p.x, p.y)) {
-                                write_pos(p.x, p.y);
-                                last_saved = Some((p.x, p.y));
+                        let maintenance = handle.clone();
+                        let _ = handle.run_on_main_thread(move || {
+                        if let Some(state) = maintenance.try_state::<PetWinMap>() {
+                            if let Ok(mut map) = state.lock() {
+                                for (label, win) in &pets {
+                                    let st = map.entry(label.clone()).or_default();
+                                    ensure_on_screen(win, st);
+                                }
+                                if let Some(st) = map.get_mut("pet") {
+                                    if let Some((ax, ay)) = st.anchor {
+                                        let key = (ax.round() as i32, ay.round() as i32);
+                                        if st.last_saved != Some(key) {
+                                            write_anchor(ax, ay);
+                                            st.last_saved = Some(key);
+                                        }
+                                    }
+                                }
                             }
                         }
+                        });
                     }
                 }
             });
@@ -609,8 +1035,8 @@ pub fn run() {
             // Settings or quit the app. Labels start in the saved language; the
             // Settings switcher re-labels them live via the `set_lang` command.
             let (p_lbl, s_lbl, u_lbl, q_lbl) = tray_labels(&read_lang());
-            let pet_visible = dirs::config_dir()
-                .map(|d| d.join("AgentPet").join("petvisible"))
+            let pet_visible = app_config_dir()
+                .map(|d| d.join("petvisible"))
                 .and_then(|p| std::fs::read_to_string(p).ok())
                 .map(|s| s.trim() != "0")
                 .unwrap_or(true);
@@ -681,17 +1107,19 @@ pub fn run() {
             dlog("setup complete, tray + loop running");
             // First run: open Settings with the welcome overlay so the user knows
             // to pick a pet and connect an agent (a port of the macOS onboarding).
-            let marker = dirs::config_dir().map(|d| d.join("AgentPet").join(".onboarded"));
+            let marker = app_config_dir().map(|d| d.join(".onboarded"));
             if let Some(m) = marker {
                 if !m.exists() {
                     let h = app.handle().clone();
                     std::thread::spawn(move || {
-                        let _ = WebviewWindowBuilder::new(
-                            &h, "settings", WebviewUrl::App("settings.html?onboarding=1".into()))
-                            .title("AgentPet")
-                            .inner_size(640.0, 620.0)
-                            .resizable(false)
-                            .build();
+                        let _ = decorate_webview(
+                            WebviewWindowBuilder::new(
+                                &h, "settings", WebviewUrl::App("settings.html?onboarding=1".into()))
+                                .title("AgentPet")
+                                .inner_size(640.0, 620.0)
+                                .resizable(false),
+                        )
+                        .build();
                     });
                     if let Some(parent) = m.parent() {
                         let _ = std::fs::create_dir_all(parent);

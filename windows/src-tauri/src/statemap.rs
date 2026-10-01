@@ -97,6 +97,15 @@ pub fn state(kind: &str, event: &str) -> Option<&'static str> {
             "stop" => Some("done"),
             _ => None,
         },
+        // jcode observer hooks. post_tool doubles as a heartbeat so a long
+        // turn isn't pruned as stale. A turn ending on a question arrives
+        // pre-normalised as "waiting" (generic path above).
+        "jcode" => match event {
+            "session_start" => Some("registered"),
+            "turn_start" | "post_tool" => Some("working"),
+            "turn_end" => Some("done"),
+            _ => None,
+        },
         _ => None,
     }
 }
@@ -106,6 +115,24 @@ pub fn is_session_end(kind: &str, event: &str) -> bool {
     matches!(
         (kind, event),
         ("claude", "SessionEnd") | ("gemini", "SessionEnd") | ("cursor", "sessionEnd") | ("droid", "SessionEnd")
-            | ("grok", "session_end")
+            | ("grok", "session_end") | ("jcode", "session_end")
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn jcode_lifecycle() {
+        assert_eq!(state("jcode", "session_start"), Some("registered"));
+        assert_eq!(state("jcode", "turn_start"), Some("working"));
+        assert_eq!(state("jcode", "post_tool"), Some("working"));
+        assert_eq!(state("jcode", "turn_end"), Some("done"));
+        assert_eq!(state("jcode", "waiting"), Some("waiting"));
+        assert_eq!(state("jcode", "pre_tool"), None);
+        assert_eq!(state("jcode", "unknown"), None);
+        assert!(is_session_end("jcode", "session_end"));
+        assert!(!is_session_end("jcode", "turn_end"));
+    }
 }

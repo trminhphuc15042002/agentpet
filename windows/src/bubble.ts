@@ -9,6 +9,13 @@ import { Session, basename, agentLabel } from "./state";
 import { agentIconUrl, uiIcon } from "./icons";
 import { stateMessage, bubbleLine } from "./activity";
 import { t } from "./i18n";
+import {
+  carouselShown,
+  carouselStep,
+  groupSessions as groupSessionsPure,
+  visibleSessions as visibleSessionsPure,
+  type Group as GroupBase,
+} from "./geometry";
 
 /// Stable hue from a custom agent's name so its lettered badge always gets the
 /// same color (issue #56, parity with the macOS CustomAgentIcon).
@@ -93,51 +100,16 @@ export function readBubbleConfig(): BubbleConfig {
   };
 }
 
-function filterIncludes(filter: BubbleConfig["filter"], state: string): boolean {
-  switch (filter) {
-    case "doneAndAbove": return state === "working" || state === "waiting" || state === "done";
-    case "workingAndWaiting": return state === "working" || state === "waiting";
-    case "workingOnly": return state === "working";
-    default: return true;
-  }
+export type Group = GroupBase<Session>;
+
+/// Sessions the bubble shows under the user's kind/state filters.
+export function visibleSessions(sessions: Session[], cfg: BubbleConfig): Session[] {
+  return visibleSessionsPure(sessions, cfg.hidden, cfg.filter);
 }
-
-const RANK: Record<string, number> = { working: 4, waiting: 3, done: 2, registered: 1, idle: 0 };
-
-export interface Group { session: Session; count: number; id: string }
 
 /// Filter → sort → group → cap (port of AgentBubble.groupedSessions).
 export function groupSessions(sessions: Session[], cfg: BubbleConfig): Group[] {
-  const filtered = sessions
-    .filter((s) => !cfg.hidden.includes(s.agent))
-    .filter((s) => filterIncludes(cfg.filter, s.state));
-
-  const sortByKind = cfg.grouping === "byKind" || cfg.sortByKind;
-  const sorted = [...filtered].sort((a, b) => {
-    if (sortByKind && a.agent !== b.agent) return a.agent < b.agent ? -1 : 1;
-    if ((RANK[a.state] ?? 0) !== (RANK[b.state] ?? 0)) return (RANK[b.state] ?? 0) - (RANK[a.state] ?? 0);
-    return b.updatedAt - a.updatedAt;
-  });
-
-  let groups: Group[];
-  if (cfg.grouping === "byKind") {
-    const seen = new Map<string, number>();
-    groups = [];
-    for (const s of sorted) {
-      const idx = seen.get(s.agent);
-      if (idx !== undefined) {
-        groups[idx] = { ...groups[idx], count: groups[idx].count + 1 };
-      } else {
-        seen.set(s.agent, groups.length);
-        groups.push({ session: s, count: 1, id: `${s.agent}-${s.session}` });
-      }
-    }
-  } else {
-    groups = sorted.map((s) => ({ session: s, count: 1, id: `${s.agent}-${s.session}` }));
-  }
-
-  if (cfg.mode === "carousel") return groups; // carousel pages through all
-  return groups.slice(0, cfg.maxSessions);
+  return groupSessionsPure(sessions, cfg);
 }
 
 // ---- Animated status text (port of AnimatedStatusText) ----------------------
@@ -280,6 +252,7 @@ export class BubbleRenderer {
   private carouselIds = "";
   private compactExpanded = false;
   private structureSig = "";
+  private paused = false;
 
   constructor(private root: HTMLElement) {}
 
@@ -342,6 +315,16 @@ export class BubbleRenderer {
     this.root.hidden = true;
   }
 
+  pause() {
+    this.paused = true;
+    if (this.carouselTimer) { clearInterval(this.carouselTimer); this.carouselTimer = null; }
+  }
+
+  resume() {
+    this.paused = false;
+    this.armCarouselTimer(this.lastCount);
+  }
+
   /// Refresh elapsed clocks (called by the app's 1s ticker too).
   tickClocks() {
     this.root.querySelectorAll<HTMLElement>(".clock[data-since]").forEach((el) => {
@@ -354,6 +337,7 @@ export class BubbleRenderer {
     this.rows.clear();
     if (this.carouselTimer) { clearInterval(this.carouselTimer); this.carouselTimer = null; }
     this.carouselIds = "";
+    this.lastCount = 0;
     this.compactExpanded = false;
     this.root.classList.remove("capsule");
     this.root.textContent = "";
@@ -369,16 +353,17 @@ export class BubbleRenderer {
     if (ids !== this.carouselIds) {
       this.carouselIds = ids;
       this.carouselIndex = 0;
-      if (this.carouselTimer) clearInterval(this.carouselTimer);
-      this.carouselTimer = groups.length > 1
-        ? window.setInterval(() => {
-            this.carouselIndex = (this.carouselIndex + 1) % Math.max(1, this.lastCount);
-            this.dirty = true;
-          }, 3000)
-        : null;
+      this.armCarouselTimer(groups.length);
     }
     this.lastCount = groups.length;
-    if (this.carouselIndex >= groups.length) this.carouselIndex = 0;
+    const shown = carouselShown(this.carouselIndex, groups.length);
+    this.carouselIndex = shown;
+    const current = groups[shown];
+    if (!current) {
+      this.clear();
+      this.root.hidden = true;
+      return;
+    }
 
     let rowHost = this.root.querySelector<HTMLElement>(".car-row");
     let dots = this.root.querySelector<HTMLElement>(".car-dots");
@@ -391,7 +376,7 @@ export class BubbleRenderer {
       this.root.appendChild(rowHost);
       this.root.appendChild(dots);
     }
-    this.syncRows([groups[this.carouselIndex]], cfg, rowHost);
+    this.syncRows([current], cfg, rowHost);
 
     if (dots) {
       if (groups.length > 1) {
@@ -405,11 +390,20 @@ export class BubbleRenderer {
             dots.appendChild(d);
           }
         }
-        [...dots.children].forEach((d, i) => d.classList.toggle("sel", i === this.carouselIndex));
+        [...dots.children].forEach((d, i) => d.classList.toggle("sel", i === shown));
       } else {
         dots.style.display = "none";
       }
     }
+  }
+
+  private armCarouselTimer(count: number) {
+    if (this.carouselTimer) { clearInterval(this.carouselTimer); this.carouselTimer = null; }
+    if (this.paused || count <= 1) return;
+    this.carouselTimer = window.setInterval(() => {
+      this.carouselIndex = carouselStep(this.carouselIndex, 1, Math.max(1, this.lastCount));
+      this.dirty = true;
+    }, 3000);
   }
   private lastCount = 0;
   /// Set when the carousel advances; the app's render loop repaints promptly.
@@ -549,6 +543,16 @@ export class BubbleRenderer {
 
   private updateRow(row: { el: HTMLElement; anim: AnimatedText; sig: string }, g: Group, _cfg: BubbleConfig) {
     const s = g.session;
+    const iconChoice = localStorage.getItem(`ap_icon_${s.agent}`) ?? `brand:${s.agent}`;
+    const partySig = (s.subagents ?? []).map((child) => `${child.id}:${child.role}`).join(",");
+    const approval = s.pendingApproval ? `${s.pendingApproval.id}|${s.pendingApproval.tool}` : "";
+    const sig = [
+      s.state, s.title, s.project, s.role, s.cost, s.live, s.session, s.model,
+      g.count, partySig, approval, iconChoice, s.terminalFocusUrl, s.terminalProgram,
+      messageFor(s),
+    ].join("\0");
+    if (sig === row.sig) return;
+    row.sig = sig;
     const el = row.el;
     el.dataset.state = s.state;
     el.classList.toggle("waiting", s.state === "waiting");
