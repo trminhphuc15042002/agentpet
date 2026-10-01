@@ -9,7 +9,10 @@ pub mod transcript;
 // Never apply this to production: tauri-build already links the bin resource,
 // and MSVC rejects two copies of its VERSION/manifest records (CVT1100).
 #[cfg(all(test, windows))]
-#[link(name = "resource", kind = "static", modifiers = "+whole-archive")]
+#[cfg_attr(target_env = "gnu", link(name = "resource", kind = "static", modifiers = "+whole-archive"))]
+// MSVC's resource.lib is an RC output (.res), not a COFF archive. Pass it
+// directly, without bundling or /WHOLEARCHIVE (which rejects this format).
+#[cfg_attr(target_env = "msvc", link(name = "resource.lib", kind = "static", modifiers = "-bundle,+verbatim"))]
 extern "C" {}
 
 use std::collections::HashMap;
