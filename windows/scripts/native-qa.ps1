@@ -525,6 +525,10 @@ function Get-ConfigHashes([string]$dir) {
     # Startup/shutdown append diagnostics when the installed app is restored.
     # This is a log, not persisted user configuration or care progress.
     if ($_.Name -eq "debug.log") { return }
+    # Live agents enqueue hook events while the installed app is stopped, then
+    # its restart consumes them. This runtime inbox is not user configuration;
+    # never delete/restore it, or omit care/config files from the comparison.
+    if ($_.PSIsContainer -and $_.Name -eq "queue") { return }
     if ($_.PSIsContainer) {
       $snap[$_.Name] = "dir:" + (@(Get-ChildItem $_.FullName -Recurse -File -ErrorAction SilentlyContinue).Count)
     } else {
@@ -891,8 +895,18 @@ try {
 (async () => {
   const win = window.__TAURI__.window.getCurrentWindow();
   const samples = [];
+  let stableTextSamples = 0;
+  let invisibleTextSamples = 0;
   const payload = {agent: "opencode", session: "qa-typing", project: "motion-qa", title: "QA"};
   const sample = async () => {
+    for (const text of document.querySelectorAll('.amsg.shimmer .typed-text')) {
+      if (!text.textContent) continue;
+      stableTextSamples++;
+      const style = getComputedStyle(text);
+      const rect = text.getBoundingClientRect();
+      if (rect.width <= 0 || rect.height <= 0 ||
+          (style.color === 'rgba(0, 0, 0, 0)' && style.backgroundImage === 'none')) invisibleTextSamples++;
+    }
     const pos = await win.outerPosition();
     const size = await win.innerSize();
     const r = document.getElementById("pet").getBoundingClientRect();
@@ -906,11 +920,50 @@ try {
     while (performance.now() < end) { await new Promise(requestAnimationFrame); await sample(); }
   }
   await window.__TAURI__.event.emit("agent-end", "qa-typing");
-  return {samples: samples.length, drift: Math.max(...samples)-Math.min(...samples)};
+  return {samples: samples.length, drift: Math.max(...samples)-Math.min(...samples), stableTextSamples, invisibleTextSamples};
 })()
 '@
   Add-Check "working-typing-canvas-anchor" ($typingMotion.value.samples -gt 20 -and $typingMotion.value.drift -le 2) "samples=$($typingMotion.value.samples) drift=$($typingMotion.value.drift)" $typingMotion.value
+  Add-Check "working-stable-text-paint" ($typingMotion.value.stableTextSamples -gt 0 -and $typingMotion.value.invisibleTextSamples -eq 0) "stable=$($typingMotion.value.stableTextSamples) invisible=$($typingMotion.value.invisibleTextSamples)" $typingMotion.value
   Start-Sleep -Milliseconds 3500
+  $carouselResize = Invoke-MainCdp @'
+(async () => {
+  const event = window.__TAURI__.event;
+  const saved = Object.fromEntries(["ap_bub_mode", "ap_bub_grouping", "ap_bub_tokens", "ap_msg_src", "ap_msg_all_working"].map(k => [k, localStorage.getItem(k)]));
+  let changes = 0, samples = 0, last = "";
+  try {
+    await event.emit("sessions-clear", null);
+    localStorage.setItem("ap_bub_mode", "carousel");
+    localStorage.setItem("ap_bub_grouping", "byKind");
+    localStorage.setItem("ap_msg_src", "custom");
+    localStorage.setItem("ap_msg_all_working", "Working on this task now!");
+    localStorage.setItem("ap_bub_tokens", JSON.stringify([
+      {token:"dot",isVisible:true}, {token:"icon",isVisible:true},
+      {token:"title",isVisible:true}, {token:"project",isVisible:true},
+      {token:"separator",isVisible:true}, {token:"message",isVisible:true},
+      {token:"stateLabel",isVisible:false}, {token:"elapsed",isVisible:false}
+    ]));
+    await event.emit("bubble-changed", null);
+    for (const [agent,title] of [["claude","Longer carousel title"],["opencode",""]]) {
+      await event.emit("agent-event", {agent,session:"qa-carousel-"+agent,project:"source",title,state:"working",desc:"Short",ts:Date.now()});
+    }
+    await new Promise(r => setTimeout(r, 250));
+    const end = performance.now() + 6500;
+    while (performance.now() < end) {
+      await new Promise(requestAnimationFrame);
+      const size = `${innerWidth},${innerHeight}`;
+      if (last && size !== last) changes++;
+      last = size; samples++;
+    }
+    return {changes,samples};
+  } finally {
+    await event.emit("sessions-clear", null);
+    for (const [k,v] of Object.entries(saved)) { if (v === null) localStorage.removeItem(k); else localStorage.setItem(k,v); }
+    await event.emit("bubble-changed", null);
+  }
+})()
+'@
+  Add-Check "carousel-resize-no-feedback" ($carouselResize.value.samples -gt 30 -and $carouselResize.value.changes -ge 2 -and $carouselResize.value.changes -le 10) "samples=$($carouselResize.value.samples) viewportChanges=$($carouselResize.value.changes) (two different-width carousel transitions; no repeated grow/shrink)" $carouselResize.value
   $companion = Invoke-MainCdp @'
 (async () => {
   const event = window.__TAURI__.event;

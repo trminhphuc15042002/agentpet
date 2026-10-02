@@ -142,7 +142,7 @@ body.overlay, body.overlay * {
 @keyframes waitflash { 0%, 100% { opacity: 1; } 50% { opacity: 0.65; } }
 
 /* shimmer sweep over stable plain text (mac ShimmeringText) */
-.bubble .amsg.shimmer {
+.bubble .amsg.shimmer .typed-text {
   background: linear-gradient(100deg,
     var(--bubble-fg, #fff) 40%, rgba(255,255,255,0.45) 50%, var(--bubble-fg, #fff) 60%);
   background-size: 220% 100%;

@@ -615,7 +615,6 @@ const petRoot = document.getElementById("pet-root") as HTMLElement;
 let lastHitSig = "";
 
 const RESIZE_TOL = 1;
-let lastApplied = { w: 260, h: 320 };
 let resizeInflight = false;
 let resizeQueued: { w: number; h: number } | null = null;
 let shrinkTimer: number | null = null;
@@ -644,7 +643,6 @@ async function sendResize(size: { w: number; h: number }) {
           height: next.h,
           petWidth: canvas.offsetWidth || 160,
         });
-        lastApplied = next;
         petOffsetLogical = result.petOffset;
         windowWidthLogical = result.windowWidth;
         applyBubbleGeometry();
@@ -664,8 +662,11 @@ function onContentSize(w: number, h: number) {
   const target = paddedSize(w, h);
   const actual = viewportSize();
   const grow = {
-    w: Math.max(target.w, lastApplied.w, actual.w),
-    h: Math.max(target.h, lastApplied.h, actual.h),
+    // A native resize event can reach the WebView before invoke resolves.
+    // A remembered larger size would undo that shrink and start a grow/shrink
+    // feedback loop. Only current content and the live viewport matter here.
+    w: Math.max(target.w, actual.w),
+    h: Math.max(target.h, actual.h),
   };
   if (grow.w > actual.w + RESIZE_TOL || grow.h > actual.h + RESIZE_TOL) {
     void sendResize(grow);

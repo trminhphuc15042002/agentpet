@@ -1,7 +1,7 @@
 {
   "name": "agentpet-windows",
   "private": true,
-  "version": "0.1.14",
+  "version": "0.1.15",
   "type": "module",
   "description": "AgentPet for Windows , a desktop pet that watches your AI coding agents.",
   "scripts": {

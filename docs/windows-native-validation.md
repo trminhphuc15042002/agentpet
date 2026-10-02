@@ -1,5 +1,71 @@
 # Windows 0.1.12 validation
 
+## Follow-up: 0.1.14 user-reported regression (2026-10-02)
+
+The user reports that **both pet and bubble** still move horizontally/vertically
+during sessions, and supplied a screenshot with the project name visible but
+message text missing. Prior pass results below are limited to their sampled
+conditions, **not evidence that the reported movement is resolved**.
+
+Confirmed text root cause in the installed release: `.amsg.shimmer` gives the
+nested `.typed-text` transparent inherited color, while its gradient background
+is on the parent, not the absolutely positioned glyph-bearing span. Stable
+messages consequently disappear even though `textContent` remains populated.
+Move the shimmer rule to `.amsg.shimmer .typed-text`. Add a native regression
+check for nonzero glyph bounds and a paint source when color is transparent.
+
+Real settings: Nezuko coder spritesheet, pet size 70%, custom Vietnamese working
+message, `ap_bind_working=3`. Two live observations (about 2 and 6 seconds) found
+no window/canvas/bubble translation; visible sprite width changed by 4 backing
+pixels. This does **not** explain the user's whole-overlay motion. A recording
+of the failing interval is requested; movement root cause remains unresolved.
+
+### 0.1.15 candidate: OBS-derived reproduction
+
+User recording `2026-10-02 11-55-45.mkv`, around **02:09**, captures whole-overlay
+horizontal oscillation during carousel retyping. Reproduced on the installed
+0.1.14 with the user's actual default **carousel/byKind**, custom messages and
+Nezuko settings. Within one carousel transition, the viewport repeatedly toggles
+between **310 and 350 logical pixels**, native x between **1688 and 1658**, while
+the current bubble content width is constant. Earlier list-mode measurements
+missed this race.
+
+Root cause: native resize events arrive before the `invoke` response updates
+`lastApplied`. `onContentSize` uses that stale, larger size as a growth floor,
+undoing the just-applied shrink and feeding another grow/shrink cycle. The fix
+removes the historical floor entirely: growth considers only current content
+and the live viewport. It applies to both width and height. Shimmer also moves
+to the glyph-bearing child, fixing the independently confirmed invisible text.
+
+Added a 6.5-second carousel fixture with different-width groups, custom working
+messages and the user's original token visibility. It counts viewport changes;
+this detects repeated resize feedback even when settled anchor samples pass.
+Queue-directory churn is excluded from **configuration** hashes: it is a live
+hook inbox created/consumed while the installed app is stopped/restarted, not
+user configuration. No queue data is deleted or restored; care/config files
+remain checked.
+
+**Final verification:** native suite passed in
+`%LOCALAPPDATA%/Temp/opencode/native-qa-20261002-120759/report.json`:
+carousel viewport changed **2 times** across two different-width transitions,
+stable-text paint **60 samples / 0 invisible**, working canvas drift about
+**0.0078 physical px**, grow timing **1966ms** (2500ms bound), plus the rest of
+the companion/edge/drag/click-through/split-window checks. An earlier run while
+packaging was active failed the unchanged grow-time bound (2840ms); it is not
+reported as passing.
+
+Installed NSIS **0.1.15**; file and Tauri runtime versions verified. Reran the
+same 6.5-second reproduction on the user's **real Nezuko/70%/working-row-3**
+profile: widths 350 → 310 → 350 occur only at the two carousel changes, instead
+of continuously toggling throughout typing. The sampled physical canvas center
+and bottom remained stable through the transitions. Original custom messages
+and animation bindings were untouched; the temporary working session was
+removed without done/token events. A desktop screenshot confirmed the complete
+Vietnamese working message is visibly painted, not merely present in the DOM.
+Restarted normally afterward: public hook port 47628 active, debug port 9224
+closed. Local screenshot: `%LOCALAPPDATA%/Temp/opencode/installed-0.1.15-text.png`.
+Mixed-DPI/multi-monitor behavior remains outside this single-display evidence.
+
 ## 0.1.14: lightweight companion + working-text regression (2026-10-02)
 
 - Native suite **passed** on the same single 2560×1600 display at 150% DPI:
