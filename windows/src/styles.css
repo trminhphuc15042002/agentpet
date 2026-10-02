@@ -92,6 +92,7 @@ body.overlay, body.overlay * {
 }
 .bubble .brow.focusable { cursor: pointer; border-radius: 6px; transition: background 0.12s; }
 .bubble .brow.focusable:hover { background: rgba(127, 127, 127, 0.16); }
+.bubble .brow.pinned { border-left: 2px solid #f59e0b; padding-left: 4px; }
 .bubble .approval { display: inline-flex; gap: 4px; margin-left: 6px; }
 .bubble .approval button { font: inherit; font-size: 10px; font-weight: 600; border: none; border-radius: 999px; padding: 1px 8px; cursor: pointer; }
 .bubble .approval .ap-allow { background: rgba(34, 197, 94, 0.18); color: #22c55e; }
@@ -123,6 +124,9 @@ body.overlay, body.overlay * {
 .bubble .rproject { font-weight: 500; opacity: 0.82; overflow: hidden; text-overflow: ellipsis; max-width: 110px; }
 .bubble .rsep { opacity: 0.35; }
 .bubble .amsg { font-weight: 500; opacity: 0.82; overflow: hidden; text-overflow: ellipsis; flex-shrink: 1; }
+.bubble .amsg { position: relative; min-width: 0; }
+.bubble .amsg::before { content: attr(data-full-text); visibility: hidden; }
+.bubble .amsg .typed-text { position: absolute; inset: 0; overflow: hidden; text-overflow: ellipsis; }
 .bubble .rstate { font-size: 0.85em; opacity: 0.55; }
 .bubble .clock { font-size: 0.85em; opacity: 0.45; font-variant-numeric: tabular-nums; }
 .bubble .xn {
@@ -822,11 +826,12 @@ body.pop {
 }
 .pop-card {
   display: flex; flex-direction: column;
+  max-height: calc(100vh - 16px);
   background: rgba(40, 40, 44, 0.97);
   border: 1px solid rgba(255,255,255,0.12);
   border-radius: 14px;
   box-shadow: 0 14px 44px rgba(0,0,0,0.5);
-  overflow: hidden;
+  overflow: auto;
 }
 .pop-head { display: flex; align-items: center; gap: 10px; padding: 13px 14px; }
 .pop-appicon-img { width: 32px; height: 32px; flex: 0 0 auto; }
@@ -852,6 +857,7 @@ body.pop {
 .pop-need[data-kind="done"] .pop-need-badge { background: rgba(48,209,88,0.18); color: #30d158; }
 .pop-agent .sess-x { visibility: hidden; }
 .pop-agent:hover .sess-x { visibility: visible; }
+.pop-agent .sess-pin, .pop-agent:focus-within .sess-x { visibility: visible; }
 .pop-agent.openable { cursor: pointer; border-radius: 6px; transition: background 0.12s; }
 .pop-agent.openable:hover { background: rgba(127, 127, 127, 0.14); }
 .pop-empty { padding: 4px 14px 10px; }

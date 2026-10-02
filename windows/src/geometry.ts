@@ -89,6 +89,7 @@ export interface Group<T = Groupable> {
 }
 
 export interface GroupConfig {
+  pinnedKey?: string;
   hidden: string[];
   filter: string;
   grouping: "byKind" | "all" | string;
@@ -120,10 +121,12 @@ export function groupSessions<T extends Groupable>(sessions: T[], cfg: GroupConf
   });
 
   let groups: Group<T>[];
+  const pinned = sorted.find((s) => `${s.agent}:${s.session}` === cfg.pinnedKey);
+  const rest = pinned ? sorted.filter((s) => s !== pinned) : sorted;
   if (cfg.grouping === "byKind") {
     const seen = new Map<string, number>();
     groups = [];
-    for (const s of sorted) {
+    for (const s of rest) {
       const idx = seen.get(s.agent);
       if (idx !== undefined) {
         groups[idx] = { ...groups[idx], count: groups[idx].count + 1 };
@@ -133,8 +136,9 @@ export function groupSessions<T extends Groupable>(sessions: T[], cfg: GroupConf
       }
     }
   } else {
-    groups = sorted.map((s) => ({ session: s, count: 1, id: `${s.agent}-${s.session}` }));
+    groups = rest.map((s) => ({ session: s, count: 1, id: `${s.agent}-${s.session}` }));
   }
+  if (pinned) groups.unshift({ session: pinned, count: 1, id: `${pinned.agent}-${pinned.session}` });
 
   if (cfg.mode === "carousel") return groups;
   return groups.slice(0, cfg.maxSessions);

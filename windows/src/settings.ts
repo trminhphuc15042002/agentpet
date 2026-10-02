@@ -8,7 +8,8 @@ import { t, getLang, setLang, type Lang } from "./i18n";
 import { agentIconUrl, uiIcon } from "./icons";
 import * as audio from "./audio";
 import { LAYOUT_PRESETS, readBubbleConfig, type TokenItem, type BubbleToken } from "./bubble";
-import { personalityID } from "./personality";
+import { personalityID, chatPool } from "./personality";
+import { readLastEvents } from "./companion";
 import { initDemo } from "./demo";
 import { slice, type Rect } from "./pet";
 import * as care from "./care";
@@ -235,6 +236,36 @@ async function loadAgents() {
 
 function renderAgents() {
   agentsRoot.innerHTML = "";
+  const tools = document.createElement("div");
+  tools.className = "row";
+  const refresh = document.createElement("button");
+  refresh.className = "mini";
+  refresh.textContent = t("Refresh connection status");
+  refresh.onclick = async () => {
+    refresh.disabled = true;
+    try { await loadAgents(); } catch (error) { refresh.disabled = false; refresh.textContent = `${t("Failed")}: ${String(error)}`; }
+  };
+  const test = document.createElement("button");
+  test.className = "mini";
+  test.textContent = t("Test display");
+  const result = document.createElement("div");
+  result.className = "cap gfoot";
+  result.setAttribute("aria-live", "polite");
+  test.onclick = async () => {
+    test.disabled = true;
+    const id = crypto.randomUUID();
+    let timeout = 0;
+    const stop = await listen<string>("diagnostics-test-received", (e) => {
+      if (e.payload !== id) return;
+      clearTimeout(timeout); stop(); test.disabled = false;
+      result.textContent = t("Display connected. Run a real agent to verify its hook.");
+    });
+    timeout = window.setTimeout(() => { stop(); test.disabled = false; result.textContent = t("No display response. Is the pet running?"); }, 3000);
+    try { await emit("diagnostics-test", id); } catch (error) { clearTimeout(timeout); stop(); test.disabled = false; result.textContent = String(error); }
+  };
+  tools.append(refresh, test);
+  agentsRoot.append(tools, result);
+  const lastEvents = readLastEvents(localStorage.getItem("ap_last_events"));
   for (const a of agentsCache) {
     const row = document.createElement("div");
     row.className = "agent-row";
@@ -250,6 +281,11 @@ function renderAgents() {
       ? `<div class="ok">${esc(t("Hook installed"))}</div>`
       : "";
     meta.innerHTML = `<div class="name">${esc(a.display_name)}</div>${status}`;
+    const connection = document.createElement("div");
+    connection.className = "cap";
+    connection.dataset.connectionAgent = a.kind;
+    connection.textContent = `${t(a.installed ? "Hook configured" : "Hook not configured")} · ${lastEvents[a.kind] ? `${t("Last real event")}: ${new Date(lastEvents[a.kind]).toLocaleString()}` : t("No real event received yet")}`;
+    meta.appendChild(connection);
     row.appendChild(meta);
 
     if (a.kind === "codex") {
@@ -273,6 +309,15 @@ function renderAgents() {
     agentsRoot.appendChild(row);
   }
 }
+
+listen("diagnostics-updated", () => {
+  const last = readLastEvents(localStorage.getItem("ap_last_events"));
+  agentsRoot.querySelectorAll<HTMLElement>("[data-connection-agent]").forEach((el) => {
+    const kind = el.dataset.connectionAgent!;
+    const configured = agentsCache.find((a) => a.kind === kind)?.installed;
+    el.textContent = `${t(configured ? "Hook configured" : "Hook not configured")} · ${last[kind] ? `${t("Last real event")}: ${new Date(last[kind]).toLocaleString()}` : t("No real event received yet")}`;
+  });
+});
 
 /// FNV-1a 32-bit hash, small and stable across runs. Used for the custom-pet
 /// slug so the same imported spritesheet always maps to the same identity.
@@ -710,7 +755,14 @@ function initBubble() {
   // Personality: the pet's voice (phrase pools + how often it speaks up).
   const personality = document.getElementById("personality") as HTMLSelectElement;
   personality.value = personalityID();
-  personality.onchange = () => { localStorage.setItem("ap_personality", personality.value); changed(); };
+  personality.onchange = () => { localStorage.setItem("ap_personality", personality.value); document.getElementById("personality-sample")!.textContent = ""; changed(); };
+  const sample = document.getElementById("personality-sample")!;
+  (document.getElementById("personality-preview") as HTMLButtonElement).onclick = () => {
+    sample.textContent = t(chatPool("done")?.[0] || "All done, go stretch ☕");
+  };
+  const reminder = document.getElementById("wait-reminder") as HTMLInputElement;
+  reminder.checked = localStorage.getItem("ap_wait_reminder") === "1";
+  reminder.onchange = () => { localStorage.setItem("ap_wait_reminder", reminder.checked ? "1" : "0"); changed(); };
 
   const idle = document.getElementById("idle") as HTMLInputElement;
   idle.checked = localStorage.getItem("ap_idle") !== "0";
@@ -1300,6 +1352,9 @@ function applyStatic() {
   set("t-activity", "Activity messages");
   set("t-phrases", "Vocabulary");
   set("t-personality", "Personality");
+  set("t-wait-reminder", "Remind after 2 minutes waiting");
+  set("t-wait-reminder-sub", "Once per wait; quiet during Focus mode.");
+  set("personality-preview", "Preview voice");
   set("t-pers-voice", "Voice");
   set("t-pers-foot", "How the pet talks when it speaks up: mood, frequency, and how it celebrates.");
   set("t-messages", "Bubble messages");
@@ -1381,6 +1436,7 @@ function initLang() {
   invoke("set_lang", { code: getLang() }).catch(() => {});
   sel.addEventListener("change", async () => {
     setLang(sel.value as Lang);
+    document.getElementById("personality-sample")!.textContent = "";
     applyStatic();
     renderAgents();
     showCurrent();

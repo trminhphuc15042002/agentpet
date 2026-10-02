@@ -10,16 +10,33 @@ import { relaunch, exit } from "@tauri-apps/plugin-process";
 import { SessionStore, basename, type AgentEventPayload, type Session, type SubagentEventPayload } from "./state";
 import { agentIconUrl } from "./icons";
 import { elapsedString } from "./bubble";
-import { t } from "./i18n";
+import { t, setLang, type Lang } from "./i18n";
 import * as care from "./care";
 import * as sync from "./sync";
 import { savedSlug, petDisplayName, getLibrary } from "./catalog";
+import { focusActive, sessionKey } from "./companion";
 
 const store = new SessionStore();
 const list = document.getElementById("pop-list")!;
 const empty = document.getElementById("pop-empty")!;
 const sub = document.getElementById("pop-sub")!;
 const clearBtn = document.getElementById("pop-clear") as HTMLButtonElement;
+const pinnedWindows = new Map<string | null, string>();
+const focusBtn = document.getElementById("pop-focus") as HTMLButtonElement;
+focusBtn.onclick = () => {
+  localStorage.setItem("ap_focus_until", String(focusActive(Number(localStorage.getItem("ap_focus_until"))) ? 0 : Date.now() + 30*60_000));
+  void emit("bubble-changed", null);
+  paintAndFit();
+};
+(document.getElementById("pop-stroke") as HTMLButtonElement).onclick = () => {
+  void emit("pet-stroke", null);
+  void getCurrentWindow().hide();
+};
+listen<{ project: string | null; key: string }>("session-pin-state", (e) => {
+  pinnedWindows.set(e.payload.project, e.payload.key);
+  paintAndFit();
+});
+listen("split-changed", () => { pinnedWindows.clear(); void emit("sessions-request", null); });
 
 function esc(s: string): string {
   return s.replace(/[&<>]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c] || c));
@@ -115,6 +132,8 @@ function applyStatic() {
   set("t-pop-settings", "Settings");
   set("t-pop-updates", "Updates");
   set("t-pop-quit", "Quit");
+  set("t-pop-focus", "Focus for 30 minutes");
+  set("pop-stroke", "Pet your companion");
 }
 
 /// Like the macOS popover: working/waiting/done sessions, idle + registered hidden.
@@ -123,6 +142,10 @@ function visible(): Session[] {
 }
 
 function paint() {
+  const until = Number(localStorage.getItem("ap_focus_until"));
+  const focused = focusActive(until);
+  focusBtn.textContent = focused ? `${t("End focus")} · ${Math.ceil((until-Date.now())/60_000)}m` : t("Start");
+  focusBtn.setAttribute("aria-pressed", String(focused));
   const sessions = visible();
   const running = sessions.filter((s) => s.state === "working").length;
   if (!sessions.length) {
@@ -138,6 +161,7 @@ function paint() {
   for (const s of sessions) {
     const row = document.createElement("div");
     row.className = "pop-agent";
+    row.dataset.sessionKey = sessionKey(s);
     row.dataset.state = s.state;
     const icon = agentIconUrl(s.agent);
     const stale = (s.state === "working" || s.state === "waiting") && Date.now() - s.updatedAt > 180_000;
@@ -159,6 +183,17 @@ function paint() {
       paint();
     };
     row.appendChild(x);
+    if (s.state !== "done") {
+      const pin = document.createElement("button");
+      const selected = [...pinnedWindows.values()].includes(sessionKey(s));
+      pin.className = "sess-x sess-pin";
+      pin.textContent = selected ? "◆" : "◇";
+      pin.title = t(selected ? "Unpin session" : "Pin session");
+      pin.setAttribute("aria-label", pin.title);
+      pin.setAttribute("aria-pressed", String(selected));
+      pin.onclick = (ev) => { ev.stopPropagation(); void emit("session-pin", sessionKey(s)); };
+      row.insertBefore(pin, x);
+    }
     // Clicking the row (not the ✕) opens the session in OpenChamber, then hides
     // the popover so the user lands straight on it.
     if (s.agent === "opencode" && s.session.startsWith("opencode:")) {
@@ -346,6 +381,7 @@ const origPaint = paint;
 function paintAndFit() { origPaint(); renderCare(); renderNeeds(); fitWindow(); }
 
 listen("care-updated", () => paintAndFit());
+listen<Lang>("lang-changed", (e) => { setLang(e.payload); applyStatic(); paintAndFit(); });
 setInterval(paintAndFit, 1000); // live elapsed + prune
 applyStatic();
 paintAndFit();

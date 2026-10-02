@@ -64,6 +64,7 @@ export const LAYOUT_PRESETS: Record<string, TokenItem[]> = {
 };
 
 export interface BubbleConfig {
+  pinnedKey?: string;
   mode: "list" | "carousel" | "compact";
   grouping: "byKind" | "all";
   sortByKind: boolean;
@@ -131,16 +132,25 @@ class AnimatedText {
   private dotTimer: number | null = null;
   private dotFrame = 0;
 
-  constructor(public el: HTMLElement) {}
+  private textEl = document.createElement("span");
+
+  constructor(public el: HTMLElement) {
+    this.textEl.className = "typed-text";
+    el.appendChild(this.textEl);
+  }
 
   set(message: string, animated: boolean) {
     if (message === this.current) return;
     this.current = message;
     this.cancelAll();
+    // Reserve the complete line, not the intermediate erased/typed substring.
+    // Otherwise every character resizes the native overlay asynchronously.
+    const full = stripEllipsis(message);
+    this.el.dataset.fullText = full.hasEllipsis ? full.text + "..." : message;
     this.el.classList.remove("shimmer");
     if (!animated) {
       this.displayed = message;
-      this.el.textContent = message;
+      this.textEl.textContent = message;
       return;
     }
     if (!this.displayed) this.startTyping(message);
@@ -152,7 +162,7 @@ class AnimatedText {
       const words = this.displayed.split(" ");
       words.pop();
       this.displayed = words.join(" ");
-      this.el.textContent = this.displayed;
+      this.textEl.textContent = this.displayed;
       if (!this.displayed) {
         if (this.eraseTimer) clearInterval(this.eraseTimer);
         this.eraseTimer = null;
@@ -168,7 +178,7 @@ class AnimatedText {
     this.typeTarget = this.hasEllipsis ? stripped.text : message;
     this.typeIndex = 0;
     this.displayed = "";
-    this.el.textContent = "";
+    this.textEl.textContent = "";
     this.typeTimer = window.setInterval(() => {
       if (this.typeIndex >= this.typeTarget.length) {
         if (this.typeTimer) clearInterval(this.typeTimer);
@@ -177,7 +187,7 @@ class AnimatedText {
         return;
       }
       this.displayed += this.typeTarget[this.typeIndex++];
-      this.el.textContent = this.displayed;
+      this.textEl.textContent = this.displayed;
     }, TYPE_MS);
   }
 
@@ -186,7 +196,7 @@ class AnimatedText {
       this.dotFrame = 0;
       this.dotTimer = window.setInterval(() => {
         this.dotFrame = (this.dotFrame + 1) % ELLIPSIS_FRAMES.length;
-        this.el.textContent = this.base + ELLIPSIS_FRAMES[this.dotFrame];
+        this.textEl.textContent = this.base + ELLIPSIS_FRAMES[this.dotFrame];
       }, DOT_CYCLE_MS);
     } else {
       this.el.classList.add("shimmer"); // sweeping highlight, like macOS
@@ -257,8 +267,9 @@ export class BubbleRenderer {
   constructor(private root: HTMLElement) {}
 
   /// Renders the bubble for the given (already pruned) sessions.
-  render(sessions: Session[]) {
+  render(sessions: Session[], pinnedKey = "") {
     const cfg = readBubbleConfig();
+    cfg.pinnedKey = pinnedKey;
     const groups = groupSessions(sessions, cfg);
     if (!groups.length) {
       this.clear();
@@ -268,14 +279,16 @@ export class BubbleRenderer {
     this.root.hidden = false;
 
     const ids = groups.map((g) => g.id).join(",");
-    const structure = `${cfg.mode}|${cfg.grouping}|${JSON.stringify(cfg.tokens)}|${cfg.separator}|${cfg.dotStyle}`;
+    if (this.root.querySelector(".single-line")) this.clear();
+    const structure = `${cfg.mode}|${cfg.grouping}|${JSON.stringify(cfg.tokens)}|${cfg.separator}|${cfg.dotStyle}|${pinnedKey}`;
     if (structure !== this.structureSig) {
       this.clear();
       this.structureSig = structure;
     }
 
     // Single visible row gets the capsule look (mac useCapsule).
-    const visibleCount = cfg.mode === "carousel" ? 1 : Math.min(groups.length, cfg.maxSessions);
+    const hasPin = groups.some((g) => `${g.session.agent}:${g.session.session}` === cfg.pinnedKey);
+    const visibleCount = cfg.mode === "carousel" ? Math.min(groups.length, hasPin ? 2 : 1) : Math.min(groups.length, cfg.maxSessions);
     this.root.classList.toggle("capsule", visibleCount <= 1 && cfg.mode !== "compact");
 
     switch (cfg.mode) {
@@ -350,6 +363,8 @@ export class BubbleRenderer {
   }
 
   private renderCarousel(groups: Group[], cfg: BubbleConfig, ids: string) {
+    const pinned = groups.find((g) => `${g.session.agent}:${g.session.session}` === cfg.pinnedKey);
+    if (pinned) groups = groups.filter((g) => g !== pinned);
     if (ids !== this.carouselIds) {
       this.carouselIds = ids;
       this.carouselIndex = 0;
@@ -359,7 +374,7 @@ export class BubbleRenderer {
     const shown = carouselShown(this.carouselIndex, groups.length);
     this.carouselIndex = shown;
     const current = groups[shown];
-    if (!current) {
+    if (!current && !pinned) {
       this.clear();
       this.root.hidden = true;
       return;
@@ -376,7 +391,7 @@ export class BubbleRenderer {
       this.root.appendChild(rowHost);
       this.root.appendChild(dots);
     }
-    this.syncRows([current], cfg, rowHost);
+    this.syncRows([...(pinned ? [pinned] : []), ...(current ? [current] : [])], cfg, rowHost);
 
     if (dots) {
       if (groups.length > 1) {
@@ -554,6 +569,7 @@ export class BubbleRenderer {
     if (sig === row.sig) return;
     row.sig = sig;
     const el = row.el;
+    el.classList.toggle("pinned", `${s.agent}:${s.session}` === _cfg.pinnedKey);
     el.dataset.state = s.state;
     el.classList.toggle("waiting", s.state === "waiting");
 

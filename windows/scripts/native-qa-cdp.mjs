@@ -106,8 +106,8 @@ async function evaluate(port, includes, expression, all) {
       expression,
       returnByValue: true,
       awaitPromise: true,
-      timeout: 7000,
-    });
+      timeout: 10000,
+    }, 12000);
     out.push({
       url: t.url,
       title: t.title,

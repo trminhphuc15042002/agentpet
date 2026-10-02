@@ -31,7 +31,7 @@ $realConfig = Join-Path $realAppData "AgentPet"
 $backupDir = Join-Path $OutDir "user-config-backup"
 $isoRoot = Join-Path $OutDir "isolated-profile"
 $isoCfg = Join-Path $isoRoot "AgentPet"
-$hookPort = 47628
+$hookPort = 47728 # isolated debug-only port; never consume live user hooks
 $installedPath = [IO.Path]::GetFullPath($InstalledExe)
 
 function Log([string]$msg) {
@@ -701,6 +701,7 @@ try {
   $envMap = @{
     AGENTPET_QA_PROFILE = $isoRoot
     AGENTPET_CDP_PORT = "$DebugPort"
+    AGENTPET_QA_HOOK_PORT = "$hookPort"
     WEBVIEW2_USER_DATA_FOLDER = $isoWeb
   }
   foreach ($k in $envMap.Keys) {
@@ -805,10 +806,23 @@ try {
   localStorage.setItem("ap_bub_hidden", "[]");
   localStorage.setItem("ap_bub_tokens", JSON.stringify(tokens));
   localStorage.setItem("ap_font_size", "14");
+  // Deterministic opaque body in every frame: hit tests must not depend on
+  // whichever community pet the online catalog happened to select today.
+  const sheet = document.createElement("canvas");
+  sheet.width = 320; sheet.height = 360;
+  const ctx = sheet.getContext("2d");
+  for (let row=0; row<9; row++) for (let frame=0; frame<8; frame++) {
+    ctx.fillStyle = row % 2 ? "#22c55e" : "#3b82f6";
+    ctx.fillRect(frame*40+7, row*40+10, 26, 26);
+  }
+  const url = sheet.toDataURL();
+  localStorage.setItem("ap_pet_custom", url);
+  localStorage.setItem("ap_pet_url", url);
   document.documentElement.style.setProperty("--bubble-font-size", "14px");
   if (window.__TAURI__ && window.__TAURI__.event) {
     await window.__TAURI__.event.emit("bubble-changed", null);
     await window.__TAURI__.event.emit("sessions-clear", null);
+    await window.__TAURI__.event.emit("set-pet", {slug:"qa", url});
   }
   return {
     mode: localStorage.getItem("ap_bub_mode"),
@@ -871,6 +885,94 @@ try {
     Start-Sleep -Milliseconds 3500
   } finally { $doneMotion = [NativeQa]::StopFrameWatch() }
   Add-Check "working-done-idle-anchor" ($completedCycles -eq 6 -and $doneMotion[0] -gt 200 -and $doneMotion[1] -le 4 -and $doneMotion[2] -le 2 -and $doneMotion[3] -ge 2) "cycles=$completedCycles samples=$($doneMotion[0]) maxX=$($doneMotion[1]/2) maxY=$($doneMotion[2]) widths=$($doneMotion[3])" $doneMotion
+  # Keep a session working long enough to observe the full typing/erasing
+  # animation. Native center alone misses movement inside the WebView.
+  $typingMotion = Invoke-MainCdp @'
+(async () => {
+  const win = window.__TAURI__.window.getCurrentWindow();
+  const samples = [];
+  const payload = {agent: "opencode", session: "qa-typing", project: "motion-qa", title: "QA"};
+  const sample = async () => {
+    const pos = await win.outerPosition();
+    const size = await win.innerSize();
+    const r = document.getElementById("pet").getBoundingClientRect();
+    const d = devicePixelRatio;
+    const after = await win.outerPosition();
+    if (pos.x === after.x && pos.y === after.y && Math.abs(size.width - innerWidth*d) <= 2) samples.push(pos.x + (r.left+r.width/2)*d);
+  };
+  for (const message of ["Short", "A much longer working message that changes the bubble width while being typed", "Short again"]) {
+    await window.__TAURI__.event.emit("agent-event", {...payload, state: "working", desc: message, ts: Date.now()});
+    const end = performance.now() + 1200;
+    while (performance.now() < end) { await new Promise(requestAnimationFrame); await sample(); }
+  }
+  await window.__TAURI__.event.emit("agent-end", "qa-typing");
+  return {samples: samples.length, drift: Math.max(...samples)-Math.min(...samples)};
+})()
+'@
+  Add-Check "working-typing-canvas-anchor" ($typingMotion.value.samples -gt 20 -and $typingMotion.value.drift -le 2) "samples=$($typingMotion.value.samples) drift=$($typingMotion.value.drift)" $typingMotion.value
+  Start-Sleep -Milliseconds 3500
+  $companion = Invoke-MainCdp @'
+(async () => {
+  const event = window.__TAURI__.event;
+  const wait = ms => new Promise(r => setTimeout(r, ms));
+  const saved = Object.fromEntries(["ap_focus_until", "ap_bub_mode", "ap_bub_grouping", "ap_lang", "ap_personality"].map(k => [k, localStorage.getItem(k)]));
+  const result = {};
+  try {
+    await event.emit("sessions-clear", null);
+    localStorage.setItem("ap_focus_until", String(Date.now()+30000));
+    await event.emit("bubble-changed", null);
+    await wait(150);
+    result.focus = document.getElementById("bubble").textContent.includes("Focusing");
+    const payload = {agent: "claude", project: "motion-qa", state: "working", ts: Date.now()};
+    await event.emit("agent-event", {...payload, session: "qa-pin-a", desc: "Pinned task"});
+    await event.emit("agent-event", {...payload, session: "qa-pin-b", desc: "Another task"});
+    await event.emit("agent-event", {...payload, agent: "codex", session: "qa-pin-c", state: "waiting", desc: "Needs reply"});
+    localStorage.setItem("ap_focus_until", "0");
+    localStorage.setItem("ap_bub_grouping", "byKind");
+    await event.emit("bubble-changed", null);
+    await event.emit("session-pin", "claude:qa-pin-a");
+    await wait(150);
+    result.pinModes = [];
+    for (const mode of ["list", "carousel", "compact"]) {
+      localStorage.setItem("ap_bub_mode", mode);
+      await event.emit("bubble-changed", null);
+      await wait(150);
+      result.pinModes.push(document.querySelectorAll(".brow.pinned").length === 1);
+    }
+    result.waitingBadge = document.getElementById("party-badge").textContent.includes("\u23f3 1");
+    let cleared = false;
+    const unpin = await event.listen("session-pin-state", e => { if (!e.payload.key) cleared = true; });
+    await event.emit("agent-end", "qa-pin-a");
+    await wait(100);
+    result.autoUnpin = cleared;
+    unpin();
+    await event.emit("sessions-clear", null);
+    const careBefore = localStorage.getItem("ap_care");
+    let received = false;
+    const stop = await event.listen("diagnostics-test-received", e => { received = e.payload === "qa-display"; });
+    await event.emit("diagnostics-test", "qa-display");
+    await wait(150);
+    result.diagnostics = received;
+    stop();
+    await event.emit("lang-changed", "vi");
+    localStorage.setItem("ap_personality", "tsundere");
+    await event.emit("pet-stroke", null);
+    await wait(150);
+    result.petVietnamese = document.getElementById("bubble").textContent.includes("th\u00eam ch\u00fat n\u1eefa");
+    result.noFakeXP = localStorage.getItem("ap_care") === careBefore;
+    await wait(2600); // effect expiry is checked on the existing 500ms UI tick
+    result.petExpired = !document.getElementById("bubble").textContent.includes("th\u00eam ch\u00fat n\u1eefa");
+    await event.emit("lang-changed", "en");
+  } finally {
+    for (const [k,v] of Object.entries(saved)) { if (v === null) localStorage.removeItem(k); else localStorage.setItem(k,v); }
+    await event.emit("sessions-clear", null);
+    await event.emit("bubble-changed", null);
+  }
+  return result;
+})()
+'@
+  $c = $companion.value
+  Add-Check "companion-native-policies" ($c.focus -and $c.autoUnpin -and $c.waitingBadge -and $c.diagnostics -and $c.petVietnamese -and $c.noFakeXP -and $c.petExpired -and @($c.pinModes | Where-Object { -not $_ }).Count -eq 0) ($c | ConvertTo-Json -Compress) $c
   $base = Get-PetGeom ([int64]$mainPet.hwnd) "main"
   $ts0 = [Diagnostics.Stopwatch]::StartNew()
   $agents = @("jcode","claude","copilot","cursor","gemini")
@@ -1164,13 +1266,22 @@ try {
   } while ($splitPets.Count -lt 3 -and (Get-Date) -lt $deadline)
   Add-Check "split-windows" ($splitPets.Count -ge 3) ("petWindows=$($splitPets.Count) invoked=$($split.value.invoked)") $splitPets
   if ($splitPets.Count -ge 2) {
-    $a = $splitPets[0]; $b = $splitPets[1]
+    $resolvedA = Resolve-CdpHwnd "project=$($split.value.ids[0])" $splitPets
+    $resolvedB = Resolve-CdpHwnd "project=$($split.value.ids[1])" $splitPets
+    if (-not $resolvedA.ok -or -not $resolvedB.ok) { throw "Cannot correlate both split targets before dragging" }
+    $a = $resolvedA.win; $b = $resolvedB.win
+    # Keep the non-target main pet away from both drag paths.
+    foreach ($other in $splitPets) {
+      if ($other.hwnd -ne $a.hwnd -and $other.hwnd -ne $b.hwnd) {
+        [NativeQa]::MoveWindow([int64]$other.hwnd, ([int]$work.workRight-700), 20, ($other.right-$other.left), ($other.bottom-$other.top)) | Out-Null
+      }
+    }
     $aw = $a.right - $a.left; $ah = $a.bottom - $a.top
     $bw = $b.right - $b.left; $bh = $b.bottom - $b.top
     [NativeQa]::MoveWindow([int64]$a.hwnd, 200, 240, $aw, $ah) | Out-Null
-    [NativeQa]::MoveWindow([int64]$b.hwnd, 700, 240, $bw, $bh) | Out-Null
+    [NativeQa]::MoveWindow([int64]$b.hwnd, 1100, 240, $bw, $bh) | Out-Null
     $null = Wait-NativeRect ([int64]$a.hwnd) 200 240 20
-    $null = Wait-NativeRect ([int64]$b.hwnd) 700 240 20
+    $null = Wait-NativeRect ([int64]$b.hwnd) 1100 240 20
     Start-Sleep -Milliseconds 1600
     $splitPets = @((Get-PetWindows ([uint32]$candPid)).pets)
     $a = $splitPets | Where-Object { $_.hwnd -eq $a.hwnd } | Select-Object -First 1
@@ -1185,6 +1296,8 @@ try {
     $dragGeom = Get-PetGeom ([int64]$a.hwnd) $dragNeedle
     $dragPoint = Get-SpritePoint $dragGeom
     $cx = $dragPoint.x; $cy = $dragPoint.y
+    $ownedDrag = Wait-UnderForm $cx $cy ([int64]$a.hwnd) 20
+    if (-not $ownedDrag.ok) { throw "Split drag pixel is not owned by the correlated target HWND" }
     [NativeQa]::Drag($cx, $cy, $cx + 80, $cy + 40, 8)
     Start-Sleep -Milliseconds 500
     $afterSplit = @((Get-PetWindows ([uint32]$candPid)).pets)
@@ -1271,6 +1384,62 @@ try {
   }
 
   if ($cdpOk) {
+  Invoke-MainCdp '(async()=>{ await window.__TAURI__.core.invoke("open_settings"); return true; })()' | Out-Null
+  Start-Sleep -Milliseconds 1200
+  $settingsControls = Invoke-TargetCdp "settings.html" @'
+(async () => {
+  const wait = ms => new Promise(r => setTimeout(r,ms));
+  const test = [...document.querySelectorAll("#agents button")].find(b => b.textContent === "Test display");
+  test.click();
+  await wait(250);
+  const diagnostics = document.getElementById("agents").textContent.includes("Display connected.");
+  const reminder = document.getElementById("wait-reminder");
+  reminder.checked = true;
+  reminder.dispatchEvent(new Event("change"));
+  const reminderSetting = localStorage.getItem("ap_wait_reminder") === "1";
+  reminder.checked = false;
+  reminder.dispatchEvent(new Event("change"));
+  const language = document.getElementById("lang");
+  language.value = "vi";
+  language.dispatchEvent(new Event("change"));
+  const voice = document.getElementById("personality");
+  voice.value = "chaotic";
+  voice.dispatchEvent(new Event("change"));
+  document.getElementById("personality-preview").click();
+  const vietnamese = document.getElementById("personality-sample").textContent.includes("XONG M");
+  language.value = "en";
+  language.dispatchEvent(new Event("change"));
+  await wait(100);
+  return {diagnostics, reminderSetting, vietnamese};
+})()
+'@
+  Add-Check "settings-companion-controls" ($settingsControls.value.diagnostics -and $settingsControls.value.reminderSetting -and $settingsControls.value.vietnamese) ($settingsControls.value | ConvertTo-Json -Compress) $settingsControls.value
+  $settingsShot = (Get-PetWindows ([uint32]$candPid)).all | Where-Object { $_.visible -and $_.title -eq "AgentPet" } | Sort-Object { $_.right-$_.left } -Descending | Select-Object -First 1
+  if ($settingsShot) { Save-Shot ([int64]$settingsShot.hwnd) "09-settings-controls" | Out-Null }
+  Invoke-TargetCdp "settings.html" 'window.__TAURI__.window.getCurrentWindow().hide()' | Out-Null
+  Invoke-MainCdp '(async()=>{ await window.__TAURI__.event.emit("agent-event", {agent:"claude",session:"qa-pop-pin",project:"motion-qa",state:"working",desc:"Popover pin test",ts:Date.now()}); await window.__TAURI__.core.invoke("open_popover"); return true; })()' | Out-Null
+  Start-Sleep -Milliseconds 800
+  $popoverControls = Invoke-TargetCdp "popover.html" @'
+(async () => {
+  const wait = ms => new Promise(r=>setTimeout(r,ms));
+  const focus = document.getElementById("pop-focus");
+  focus.click();
+  await wait(100);
+  const started = Number(localStorage.getItem("ap_focus_until")) > Date.now();
+  focus.click();
+  const stopped = Number(localStorage.getItem("ap_focus_until")) === 0;
+  const pin = document.querySelector('[data-session-key="claude:qa-pop-pin"] .sess-pin');
+  pin.click();
+  await wait(150);
+  const pinned = document.querySelector('[data-session-key="claude:qa-pop-pin"] .sess-pin').getAttribute("aria-pressed") === "true";
+  return {started, stopped, pinned, pettingButton: !!document.getElementById("pop-stroke")};
+})()
+'@
+  Add-Check "popover-companion-controls" ($popoverControls.value.started -and $popoverControls.value.stopped -and $popoverControls.value.pinned -and $popoverControls.value.pettingButton) ($popoverControls.value | ConvertTo-Json -Compress) $popoverControls.value
+  $popoverShot = (Get-PetWindows ([uint32]$candPid)).all | Where-Object { $_.visible -and $_.title -eq "AgentPet" -and [Math]::Abs(($_.right-$_.left)-450) -le 3 } | Select-Object -First 1
+  if ($popoverShot) { Save-Shot ([int64]$popoverShot.hwnd) "10-popover-controls" | Out-Null }
+  Invoke-TargetCdp "popover.html" 'window.__TAURI__.window.getCurrentWindow().hide()' | Out-Null
+  Invoke-MainCdp '(async()=>{ await window.__TAURI__.event.emit("agent-end","qa-pop-pin"); return true; })()' | Out-Null
   $hide = Invoke-Cdp @("eval", "$DebugPort", "main", "(async()=>{ if(window.__TAURI__?.core){ await window.__TAURI__.core.invoke('set_pet_visible',{visible:false}); return {ok:true}; } return {ok:false}; })()")
   Start-Sleep -Milliseconds 400
   $hiddenWins = @((Get-PetWindows ([uint32]$candPid)).pets | Where-Object { $_.visible })

@@ -15,6 +15,8 @@ import * as history from "./history";
 import * as reactive from "./reactive";
 import * as projectpets from "./projectpets";
 import * as audio from "./audio";
+import { focusActive, WaitingReminders, sessionKey, readLastEvents } from "./companion";
+import { pettingLine } from "./personality";
 
 // Which project THIS pet window represents. `null` = the main window (the
 // default single pet). Split-pet spawns extra windows with `?project=<id>`.
@@ -70,6 +72,7 @@ const partyBadge = document.getElementById("party-badge") as HTMLDivElement;
 const pet = new Pet(canvas);
 const store = new SessionStore();
 const bubble = new BubbleRenderer(bubbleEl);
+const lastEvents = readLastEvents(localStorage.getItem("ap_last_events"));
 
 // --- bubble appearance (theme / opacity / fonts) ------------------------------
 const FONT_FAMILIES: Record<string, string> = {
@@ -149,10 +152,17 @@ let prevSimpleMood = "";
 let moodLine = ""; // the single-bubble line for idle/done/celebrate
 let reactiveLine = "";
 let reactiveUntil = 0;
+let pinnedKey = "";
+let pettingUntil = 0;
+let pettingText = "";
+let previewUntil = 0;
+const isFocused = () => focusActive(Number(localStorage.getItem("ap_focus_until")));
+
+function publishPin() { void emit("session-pin-state", { project: MY_PROJECT, key: windowDead ? "" : pinnedKey }); }
 
 /// Show a reactive comment for a few seconds (mac PetController.flashReactiveLine).
 function flashReactive(line: string | null) {
-  if (!line) return;
+  if (!line || isFocused()) return;
   reactiveLine = line;
   reactiveUntil = Date.now() + 5000;
   render();
@@ -179,16 +189,20 @@ function pickMoodLine(mood: string) {
 
 function render() {
   const sessions = store.active().filter((s) => ownsProject(s.project));
+  if (pinnedKey && !sessions.some((s) => sessionKey(s) === pinnedKey && s.state !== "done")) {
+    pinnedKey = "";
+    publishPin();
+  }
+  const focused = isFocused();
   const subagentCount = sessions.reduce((count, session) => count + session.subagents.length, 0);
   const subagentRoles = sessions.flatMap((session) => session.subagents.map((child) => child.role.trim() || "Subagent"));
-  partyBadge.hidden = subagentCount === 0;
-  partyBadge.textContent = `👥 ${subagentCount}`;
-  partyBadge.title = subagentRoles.length
-    ? `Active subagents:\n${subagentRoles.join("\n")}`
-    : `${subagentCount} active subagent${subagentCount === 1 ? "" : "s"}`;
+  const waitingCount = sessions.filter((s) => s.state === "waiting" || s.pendingApproval).length;
+  partyBadge.hidden = subagentCount === 0 && waitingCount === 0 && !focused;
+  partyBadge.textContent = [focused ? "☕" : "", subagentCount ? `👥 ${subagentCount}` : "", waitingCount ? `⏳ ${waitingCount}` : ""].filter(Boolean).join(" · ");
+  partyBadge.title = [focused ? t("Focusing") : "", waitingCount ? `${waitingCount} · ${t("Waiting for you")}` : "", ...subagentRoles].filter(Boolean).join("\n");
   const resolved = aggregateMood(sessions);
 
-  if (resolved === "done" && lastResolved !== "done") {
+  if (!focused && resolved === "done" && lastResolved !== "done") {
     celebrateUntil = Date.now() + 3000; // celebrate burst, like macOS
     pickMoodLine("celebrate");
   }
@@ -198,7 +212,7 @@ function render() {
   }
   lastResolved = resolved;
 
-  const celebrating = Date.now() < celebrateUntil;
+  const celebrating = !focused && Date.now() < celebrateUntil;
   if (wasCelebrating && !celebrating) {
     // The 3s burst ended , settle into the actual mood's line (mac
     // settleAfterCelebrate re-picks on the celebrate→done transition).
@@ -206,18 +220,25 @@ function render() {
   }
   wasCelebrating = celebrating;
   const mood = celebrating ? "celebrate" : resolved;
-  pet.setState(mood);
+  const needsInput = sessions.some((s) => s.state === "waiting" || s.pendingApproval);
+  if (needsInput) pettingUntil = 0;
+  const petting = Date.now() < pettingUntil && !focused;
+  pet.setState(petting ? "celebrate" : mood);
 
   // A reactive comment briefly overrides the quiet single-line moods (not the
   // multi-agent working bubble, not the celebrate burst).
-  const reactiveActive = Date.now() < reactiveUntil && !!reactiveLine;
+  const reactiveActive = !focused && Date.now() < reactiveUntil && !!reactiveLine;
 
   const multi = localStorage.getItem("ap_multi") !== "0";
   const activeRows = sessions.filter((s) => s.state !== "idle" && s.state !== "registered");
   const visibleGroups = multi ? groupSessions(activeRows, readBubbleConfig()) : [];
-  if (mood === "working" || mood === "waiting") {
+  if (petting) {
+    bubble.renderLine(pettingText);
+  } else if (focused && !needsInput) {
+    bubble.renderLine(t("Focusing"));
+  } else if (mood === "working" || mood === "waiting") {
     if (multi && visibleGroups.length) {
-      bubble.render(activeRows);
+      bubble.render(activeRows, pinnedKey);
     } else {
       // Simple-bubble / personality fallback when multi is off OR filters hide every group.
       if (resolved !== prevSimpleMood) { pickMoodLine(mood); prevSimpleMood = resolved; }
@@ -233,6 +254,8 @@ function render() {
     // idle: a persistent quiet line (mac shows it continuously, no blinking)
     if (reactiveActive) {
       bubble.renderLine(reactiveLine);
+    } else if (Date.now() < previewUntil) {
+      bubble.renderLine(t("Display test received"));
     } else if (localStorage.getItem("ap_idle") !== "0") {
       if (!moodLine) pickMoodLine("idle");
       bubble.renderLine(moodLine);
@@ -253,8 +276,13 @@ let maintTimer: number | null = null;
 let clockTimer: number | null = null;
 let dirtyTimer: number | null = null;
 let hungerTimer: number | null = null;
+let lastFocus = isFocused();
 
 function maintain() {
+  const focused = isFocused();
+  if (focused !== lastFocus) { lastFocus = focused; moodLine = ""; render(); }
+  if (pettingUntil && Date.now() >= pettingUntil) { pettingUntil = 0; render(); }
+  if (previewUntil && Date.now() >= previewUntil) { previewUntil = 0; render(); }
   const before = maintenanceSig(store.snapshot());
   store.active();
   const now = Date.now();
@@ -377,6 +405,7 @@ function maybeNotify(e: AgentEventPayload) {
   // Chimes + notifications fire once , the main window only.
   if (!IS_MAIN) return;
   if (e.state !== "done" && e.state !== "waiting") return;
+  if (e.state === "done" && isFocused()) return;
   void audio.playSound(e.state === "done" ? "done" : "waiting");
   if (!notifyReady || localStorage.getItem("ap_notify") === "0") return;
   const proj = (e.project ? basename(e.project) : "") || e.agent;
@@ -388,10 +417,45 @@ function maybeNotify(e: AgentEventPayload) {
   try { sendNotification({ title, body }); } catch {}
 }
 
+const reminders = new WaitingReminders();
+let reminderTimer: number | null = null;
+function armReminder() {
+  if (!IS_MAIN) return;
+  if (reminderTimer) clearTimeout(reminderTimer);
+  reminderTimer = null;
+  if (localStorage.getItem("ap_wait_reminder") !== "1") return;
+  const delay = reminders.nextDelay(store.snapshot(), Date.now());
+  if (delay === null) return;
+  reminderTimer = window.setTimeout(() => {
+    reminderTimer = null;
+    const due = reminders.takeDue(store.snapshot(), Date.now());
+    if (due.length && !isFocused()) {
+      if (notifyReady && localStorage.getItem("ap_notify") !== "0") {
+        const body = due.map((s) => basename(s.project) || s.agent).join(", ");
+        try { sendNotification({ title: `${due.length} · ${t("Still waiting for you")}`, body }); } catch {}
+      }
+      void audio.playSound("waiting");
+    }
+    armReminder();
+  }, delay);
+}
+
 // --- agent events from the Rust listener -------------------------------------
 listen<AgentEventPayload>("agent-event", (e) => {
+  if (IS_MAIN) {
+    const ts = Math.min(e.payload.ts || Date.now(), Date.now());
+    if (/^[a-z0-9_-]{1,40}$/i.test(e.payload.agent) && ts > 0 && ts - (lastEvents[e.payload.agent] || 0) >= 10_000) {
+      // Bound persistence frequency for chatty hooks; no periodic flush timer.
+      lastEvents[e.payload.agent] = ts;
+      const bounded = Object.fromEntries(Object.entries(lastEvents).sort((a, b) => b[1] - a[1]).slice(0, 32));
+      for (const key of Object.keys(lastEvents)) if (!(key in bounded)) delete lastEvents[key];
+      localStorage.setItem("ap_last_events", JSON.stringify(bounded));
+      void emit("diagnostics-updated", null);
+    }
+  }
   maybeNotify(e.payload);
   store.update(e.payload);
+  armReminder();
   const owned = store.active().filter((s) => ownsProject(s.project)).length;
   flashReactive(reactive.evaluate("sessionCount", owned));
   render();
@@ -416,6 +480,7 @@ listen<string>("agent-end", (e) => {
   for (const k of [...lastState.keys()]) if (k.endsWith(`:${e.payload}`)) lastState.delete(k);
   for (const k of [...sessionStarts.keys()]) if (k.endsWith(`:${e.payload}`)) sessionStarts.delete(k);
   store.remove(e.payload);
+  armReminder();
   render();
 });
 // Tokens burned by an agent feed THIS window's pet , only the owning window, so
@@ -452,15 +517,37 @@ if (IS_MAIN) {
   listen("split-changed", () => {
     if (!projectpets.splitEnabled() || (MY_PROJECT && !projectpets.configuredProjectIds().includes(MY_PROJECT))) {
       windowDead = true;
+      publishPin();
     }
   });
 }
 // Settings window: dismiss one session / clear all (mac popover actions).
-listen<string>("session-dismiss", (e) => { store.removeKey(e.payload); render(); });
-listen("sessions-clear", () => { store.clear(); render(); });
+listen<string>("session-dismiss", (e) => { store.removeKey(e.payload); armReminder(); render(); });
+listen("sessions-clear", () => { store.clear(); armReminder(); render(); });
 // A freshly opened Settings window asks for the current sessions.
 listen("sessions-request", () => {
   for (const s of store.snapshot()) emit("session-snapshot", s);
+  publishPin();
+});
+listen<string>("session-pin", (e) => {
+  const session = store.active().find((s) => sessionKey(s) === e.payload && ownsProject(s.project));
+  if (!session || session.state === "done") return;
+  pinnedKey = pinnedKey === e.payload ? "" : e.payload;
+  publishPin();
+  render();
+});
+listen("pet-stroke", () => {
+  if (!IS_MAIN || isFocused() || Date.now() < pettingUntil) return;
+  if (store.active().some((s) => s.state === "waiting" || s.pendingApproval)) return;
+  pettingUntil = Date.now() + 2000;
+  pettingText = pettingLine();
+  render();
+});
+listen<string>("diagnostics-test", (e) => {
+  if (!IS_MAIN) return;
+  previewUntil = Date.now() + 3000;
+  render();
+  void emit("diagnostics-test-received", e.payload);
 });
 // Pet changed from the Settings window.
 listen<{ slug: string; url: string }>("set-pet", (e) => {
@@ -471,7 +558,7 @@ listen<{ slug: string; url: string }>("set-pet", (e) => {
 // Language changed from Settings , re-render the bubble in the new language.
 listen<Lang>("lang-changed", (e) => { setLang(e.payload); render(); });
 // Bubble theme / opacity / messages changed from Settings.
-listen("bubble-changed", () => { applyBubble(); applyPet(); moodLine = ""; render(); });
+listen("bubble-changed", () => { applyBubble(); applyPet(); moodLine = ""; armReminder(); render(); });
 
 // Tray "Check for updates" (Rust emits this to the main pet window only). The
 // popover has a labelled Updates button, but on Linux appindicator can't open

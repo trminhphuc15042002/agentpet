@@ -9,6 +9,8 @@
 // defaults, which are exactly the phrases the app shipped with. Unknown ids
 // also resolve to "cozy", so a stale saved value can never blank the pet.
 
+import { getLang, t } from "./i18n";
+
 export type PersonalityID = "cozy" | "tsundere" | "chaotic";
 
 /// Reactive pools a non-default pack may override. Keys match the metrics in
@@ -99,6 +101,58 @@ const OVERRIDES: Record<Exclude<PersonalityID, "cozy">, PersonalityOverride> = {
 
 const CHATTINESS: Record<PersonalityID, number> = { cozy: 1, tsundere: 0.7, chaotic: 1.3 };
 
+const VI_CHAT: Record<PersonalityID, ChatPools> = {
+  cozy: {
+    idle: ["Mình ở đây, cứ thong thả nha.", "Một chút yên tĩnh cũng tốt mà."],
+    waiting: ["Đến lượt bạn rồi nè.", "Có một bạn đang chờ trả lời đó."],
+    done: ["Xong lượt này rồi, nghỉ tay chút nha.", "Gọn gàng rồi đó. Mình chờ lượt tiếp nhé."],
+    celebrate: ["Thêm một việc xong rồi! ☕", "Có tiến triển rồi, vui ghê!"],
+  },
+  tsundere: {
+    idle: ["Repo im quá. Không phải mình thấy nhớ đâu.", "Rảnh thì nghỉ đi. Mình vẫn canh ở đây."],
+    waiting: ["Người ta đang chờ đó. Trả lời đi.", "Đến lượt bạn rồi. Đừng để chờ lâu."],
+    done: ["Xong rồi đó. Cũng không tệ.", "Thấy chưa? Mình có lo đâu."],
+    celebrate: ["Được rồi, lần này đáng khen.", "Thắng rồi. Đừng làm mình nói lại."],
+  },
+  chaotic: {
+    idle: ["Đội hình sẵn sàng! Chờ lệnh! 🚀", "Repo yên tĩnh. Bình yên trước cơn build!"],
+    waiting: ["ALO! Đến lượt con người! 👀", "Agent gọi viện trợ! Bạn đâu rồi?"],
+    done: ["XONG MỘT KÈO! 🚀", "Nhiệm vụ hoàn tất! Đi kiểm tra thành quả nào!"],
+    celebrate: ["THẮNG RỒI! 🎉", "Thêm một chiến công! 🚀"],
+  },
+};
+
+// Short native-language lines; thresholds and cooldowns remain unchanged.
+const VI_REACTIVE: Record<PersonalityID, ReactivePools> = {
+  cozy: {
+    dailyTokensLow: ["Hôm nay cũng làm được kha khá rồi nè."], dailyTokensMid: ["Token đi nhanh quá, nhớ giữ nhịp nha."], dailyTokensHigh: ["Hôm nay dùng nhiều token rồi, nghỉ chút nhé."],
+    sessionCountLow: ["Có cả một đội đang làm cùng bạn."], sessionCountHigh: ["Đông đồng đội ghê, nhớ xem ai cần bạn nha."],
+    hungerLow: ["Mình hơi đói một chút."], hungerMid: ["Lâu rồi chưa có bữa mới nè."], hungerHigh: ["Khi nào bạn quay lại, mình vẫn ở đây."],
+    streakLow: ["Đều đặn vài ngày rồi đó."], streakMid: ["Cả tuần rồi, giỏi ghê!"], streakHigh: ["Bền bỉ thật, nhớ nghỉ ngơi nữa nha."],
+    dailyMealsLow: ["Thêm vài lượt việc được hoàn thành rồi."], dailyMealsMid: ["Năm mươi lượt rồi, nghỉ tay chút nhé."], dailyMealsHigh: ["Hơn trăm lượt! Hôm nay vất vả rồi."],
+  },
+  tsundere: {
+    dailyTokensLow: ["Có làm việc đấy. Mình thấy rồi."], dailyTokensMid: ["Token không mọc trên cây đâu nha."], dailyTokensHigh: ["Dùng nhiều rồi đó. Kiểm tra mức dùng đi."],
+    sessionCountLow: ["Đông agent ghê. Đừng quên đứa nào."], sessionCountHigh: ["Cả đội quân luôn? Bạn quản nổi không?"],
+    hungerLow: ["Không đói. Chỉ hơi muốn ăn thôi."], hungerMid: ["Này, lâu rồi chưa cho mình ăn đó."], hungerHigh: ["Bạn đi đâu rồi? Mình chỉ hỏi thôi."],
+    streakLow: ["Cũng đều đặn đấy. Đừng tự mãn."], streakMid: ["Một tuần rồi. Mình có đếm đâu."], streakHigh: ["Bền bỉ thật. Rồi, khen đó."],
+    dailyMealsLow: ["Cũng xong được vài việc rồi."], dailyMealsMid: ["Năm mươi lượt? Nghỉ đi."], dailyMealsHigh: ["Hơn trăm lượt rồi. Đi ngủ, nghe chưa."],
+  },
+  chaotic: {
+    dailyTokensLow: ["Lò token đã khởi động! 🔥"], dailyTokensMid: ["Nhiên liệu đang đi nhanh!"], dailyTokensHigh: ["BÁO ĐỘNG TOKEN! Kiểm tra mức dùng! 🌋"],
+    sessionCountLow: ["Biệt đội agent tập hợp!"], sessionCountHigh: ["TRUNG TÂM CHỈ HUY ONLINE! 😳"],
+    hungerLow: ["Tiếp tế đồ ăn đi nào!"], hungerMid: ["Bụng phát tín hiệu SOS! 🔔"], hungerHigh: ["Đội cứu hộ đồ ăn đâu rồi?!"],
+    streakLow: ["Chuỗi ngày đã lên đà!"], streakMid: ["NGUYÊN TUẦN! 🎉"], streakHigh: ["HUYỀN THOẠI! Giờ nhớ nghỉ nhé!"],
+    dailyMealsLow: ["Nhiệm vụ nối tiếp nhiệm vụ!"], dailyMealsMid: ["NĂM MƯƠI LƯỢT! 🎯"], dailyMealsHigh: ["TRĂM LƯỢT! Nghỉ để hồi năng lượng! 🚀"],
+  },
+};
+
+export function pettingLine(): string {
+  const id = personalityID();
+  if (getLang() === "vi") return { cozy: "Ấm áp ghê. Cảm ơn bạn nha ♥", tsundere: "Được rồi… thêm chút nữa cũng được.", chaotic: "NẠP NĂNG LƯỢNG BẰNG CÁI VUỐT! ♥" }[id];
+  return t({ cozy: "That feels nice. Thank you ♥", tsundere: "Fine… one more pat is okay.", chaotic: "PAT POWER ACTIVATED! ♥" }[id]);
+}
+
 function clamp(n: number, lo: number, hi: number): number {
   return Math.min(hi, Math.max(lo, n));
 }
@@ -111,6 +165,7 @@ export function personalityID(): PersonalityID {
 /// Reactive phrase pool for a metric tier, falling back to the cozy defaults.
 export function reactivePool(key: string): string[] | null {
   const id = personalityID();
+  if (getLang() === "vi") return VI_REACTIVE[id][key] ?? null;
   if (id !== "cozy") {
     const override = OVERRIDES[id].reactive[key];
     if (override) return override;
@@ -121,6 +176,7 @@ export function reactivePool(key: string): string[] | null {
 /// Chat override for a mood, or null when the pack keeps the built-in lines.
 export function chatPool(mood: string): string[] | null {
   const id = personalityID();
+  if (getLang() === "vi") return VI_CHAT[id][mood as keyof ChatPools] ?? null;
   if (id !== "cozy") {
     const override = OVERRIDES[id].chat[mood as keyof ChatPools];
     if (override) return override;

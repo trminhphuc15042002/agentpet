@@ -1,12 +1,13 @@
 {
   "name": "agentpet-windows",
   "private": true,
-  "version": "0.1.13",
+  "version": "0.1.14",
   "type": "module",
   "description": "AgentPet for Windows , a desktop pet that watches your AI coding agents.",
   "scripts": {
     "dev": "vite",
     "build": "tsc --noEmit && vite build",
+    "check:companion": "node --experimental-strip-types scripts/check-companion.ts",
     "tauri": "tauri"
   },
   "dependencies": {

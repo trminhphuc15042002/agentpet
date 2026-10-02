@@ -87,6 +87,9 @@
             <label class="row"><span class="rt"><span id="t-notify">Notifications on</span>
               <span class="cap" id="t-notify-sub">Alerts when an agent finishes or needs input</span></span>
               <input type="checkbox" id="notify" /></label>
+            <label class="row"><span class="rt"><span id="t-wait-reminder">Remind after 2 minutes waiting</span>
+              <span class="cap" id="t-wait-reminder-sub">Once per wait; quiet during Focus mode.</span></span>
+              <input type="checkbox" id="wait-reminder" /></label>
           </div>
         </div>
 
@@ -382,6 +385,8 @@
               </select></div>
           </div>
           <div class="cap gfoot" id="t-pers-foot">How the pet talks when it speaks up: mood, frequency, and how it celebrates.</div>
+          <button class="mini" id="personality-preview">Preview voice</button>
+          <div class="cap gfoot" id="personality-sample" aria-live="polite"></div>
         </div>
 
         <div class="group">

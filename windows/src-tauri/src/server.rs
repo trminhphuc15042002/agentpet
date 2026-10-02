@@ -127,6 +127,16 @@ fn handle_approval(app: AppHandle, body: String, req: tiny_http::Request) {
 }
 
 pub fn start(app: AppHandle) {
+    // Native QA must not ingest hooks from the user's live coding session.
+    // Release builds always use the public port; override only in an isolated
+    // debug profile, matching the existing QA/CDP environment controls.
+    let port = HOOK_PORT;
+    #[cfg(debug_assertions)]
+    let port = if std::env::var_os("AGENTPET_QA_PROFILE").is_some() {
+        std::env::var("AGENTPET_QA_HOOK_PORT").ok()
+            .and_then(|value| value.parse::<u16>().ok())
+            .filter(|value| *value > 0).unwrap_or(port)
+    } else { port };
     // Replay events queued while the app was closed (name order = time order).
     if let Some(dir) = crate::cli::queue_dir() {
         if let Ok(entries) = std::fs::read_dir(&dir) {
@@ -150,9 +160,9 @@ pub fn start(app: AppHandle) {
         // runtime poll), then still yield if another instance truly owns it.
         let mut server = None;
         for attempt in 0..10 {
-            match tiny_http::Server::http(("127.0.0.1", HOOK_PORT)) {
+            match tiny_http::Server::http(("127.0.0.1", port)) {
                 Ok(bound) => {
-                    crate::dlog("hook listener bound on 127.0.0.1:47628");
+                    crate::dlog(&format!("hook listener bound on 127.0.0.1:{port}"));
                     server = Some(bound);
                     break;
                 }

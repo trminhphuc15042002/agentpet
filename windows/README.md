@@ -78,6 +78,11 @@ agent hook  ──(stdin JSON)──►  agentpet.exe hook --agent <kind>
 
 ## Features (parity with macOS)
 
+Windows companion controls also include a 30-minute Focus override, per-window
+session pinning (◇ in the popover), optional once-per-wait reminders, connection
+diagnostics, Vietnamese personality voices and a two-second petting interaction.
+See [behavior and limits](../docs/specs/2026-10-02-lightweight-companion.md).
+
 - 13 agents, matching the Rust hook catalog.
 - Pet picker (search / random) + "use your own spritesheet".
 - Bubble customization: theme (dark/light/system), opacity, font size/family,
@@ -153,14 +158,16 @@ not the Windows package version. This fork's Windows package is `0.1.13`.
 
 ```powershell
 cd windows
-cargo test --manifest-path src-tauri/Cargo.toml --lib
+Push-Location src-tauri
+cargo test --lib
+Pop-Location
 node --experimental-strip-types scripts/check-geometry.ts
 node node_modules/@tauri-apps/cli/tauri.js build --debug --no-bundle --config src-tauri/qa.windows.json
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts/native-qa.ps1 -MonitorBoundary
 ```
 
-The native check briefly stops/restarts the installed AgentPet to own its hook
-port, uses a separate debug-only profile and verifies real configuration hashes
+The native check briefly stops/restarts the installed AgentPet for single-instance
+isolation, uses a separate debug-only profile/hook port and verifies real configuration hashes
 remain unchanged. It moves the mouse and opens a temporary click-counter window;
 do not interact with the desktop while it runs. CDP/profile overrides are compiled
 out of release builds. Reports/screenshots are written to the printed output path.

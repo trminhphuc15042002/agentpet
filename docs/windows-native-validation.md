@@ -1,5 +1,35 @@
 # Windows 0.1.12 validation
 
+## 0.1.14: lightweight companion + working-text regression (2026-10-02)
+
+- Native suite **passed** on the same single 2560×1600 display at 150% DPI:
+  continuous working-text canvas-center drift **0.0078 physical px**, six
+  working/done/idle cycles at **0.5 px** maximum native-center drift, and all
+  grow/shrink, screen-edge, approval, display-mode, drag and click-through checks.
+- Focus controls, pinning in list/carousel/compact, auto-unpin, waiting badge,
+  diagnostic request/ack, Vietnamese voice preview and petting/expiry passed in
+  real WebView2 windows. Diagnostic/petting actions left care data unchanged.
+- 74 Rust library tests, TypeScript/Vite build, geometry checks and companion
+  policy checks passed. Rust tests must run **inside `windows/src-tauri`** to
+  discover this checkout's local linker config; invoking cargo from `windows`
+  selected an incompatible global MinGW linker on this machine.
+- Animated text now reserves its full message width; intermediate text no longer
+  drives native resizes. Plain bubbles are cleared when returning to rows.
+- QA additionally uses an isolated debug-only hook port (`47728`), so real coding
+  hooks cannot contaminate fixture sessions, and a deterministic sprite for hit
+  tests. Release builds still bind `47628`. Window/DOM samples reject in-flight
+  coordinate changes; the new check covers the canvas center, not just HWND.
+- Added the missing `core:window:allow-hide` capability for existing app windows:
+  native control tests exposed rejected hide requests from the popover/settings.
+- Real user configuration hashes were unchanged and the installed app restored.
+
+Final local evidence: `%LOCALAPPDATA%/Temp/opencode/native-qa-20261002-113122/report.json`.
+NSIS installer built at `windows/src-tauri/target/release/bundle/nsis/AgentPet_0.1.14_x64-setup.exe`
+(5,806,012 bytes). It has not been installed over the user's running app or
+published. No commit/tag/push was performed.
+Mixed-monitor/DPI QA and comparative idle CPU/RSS measurements remain unverified.
+Behavior/scope: [lightweight companion spec](specs/2026-10-02-lightweight-companion.md).
+
 ## 0.1.13 follow-up: transient task-completion motion
 
 Installed 0.1.12 showed a transient 127px horizontal jump during resize despite
