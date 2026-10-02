@@ -30,6 +30,32 @@ published. No commit/tag/push was performed.
 Mixed-monitor/DPI QA and comparative idle CPU/RSS measurements remain unverified.
 Behavior/scope: [lightweight companion spec](specs/2026-10-02-lightweight-companion.md).
 
+### Installed-release verification (2026-10-02)
+
+Installed NSIS 0.1.14 into `%LOCALAPPDATA%/AgentPet`, then checked both executable
+file version and Tauri runtime version: **0.1.14**. First silent install returned
+zero but left the old executable; stopping the process, waiting for exit and
+rerunning the installer replaced it successfully. Installer status alone is not
+sufficient evidence of an upgrade.
+
+Temporarily enabled localhost WebView2 CDP on port 9224 for the installed release,
+without changing the app's persisted profile. Verified against a **real working
+OpenCode session**, without injecting synthetic agent events:
+
+- Focus start/end and visible Focus badge: pass.
+- Pin/unpin the real session via popover controls: pass.
+- Display diagnostics request/ack: pass; real OpenCode last-event time displayed.
+- Waiting reminder setting on/off persisted correctly; restored original setting.
+  Actual two-minute delivery was not triggered in the user's live session.
+- All three Vietnamese voice previews: pass; original voice/language restored.
+- Petting text displayed, menu hid, effect expired and real working state resumed.
+- Canvas-center sampling: 169 samples, about **0.5 physical px** range during
+  petting → real working transition on the installed release.
+
+Closed the diagnostic instance and restarted normally. Installed process owns
+127.0.0.1:47628; no listener remains on debug port 9224. The CDP helper now selects
+only `/` or `/index.html` for `main`, excluding settings/popover pages.
+
 ## 0.1.13 follow-up: transient task-completion motion
 
 Installed 0.1.12 showed a transient 127px horizontal jump during resize despite

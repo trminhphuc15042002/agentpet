@@ -57,7 +57,12 @@ function pickTarget(targets, includes) {
   if (needle === "main") {
     return pages.find((t) => {
       const u = (t.url || "").toLowerCase();
-      return u.includes("tauri.localhost") && !u.includes("project=");
+      try {
+        const url = new URL(u);
+        return url.hostname === "tauri.localhost" &&
+          (url.pathname === "/" || url.pathname === "/index.html") &&
+          !url.searchParams.has("project");
+      } catch { return false; }
     });
   }
   return pages.find((t) => (t.url || "").toLowerCase().includes(needle));
