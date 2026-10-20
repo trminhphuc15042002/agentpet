@@ -272,10 +272,11 @@ fn handle_event(app: &AppHandle, body: &str) {
             let agent2 = agent.clone();
             std::thread::spawn(move || {
                 let path = crate::transcript::subagent_transcript_path(&parent, &subagent);
-                if let Some((tokens, cost)) = crate::transcript::new_usage_delta(&path) {
-                    if tokens > 0 {
+                if let Some(u) = crate::transcript::new_usage_detail(&path) {
+                    if u.tokens > 0 {
                         let _ = app2.emit("agent-tokens", serde_json::json!({
-                            "agent": agent2, "session": sess, "project": proj, "tokens": tokens, "cost": cost,
+                            "agent": agent2, "session": sess, "project": proj, "tokens": u.tokens, "cost": u.cost,
+                            "input": u.input, "output": u.output, "cacheRead": u.cache_read, "cacheWrite": u.cache_write,
                         }));
                     }
                 }
@@ -334,11 +335,12 @@ fn handle_event(app: &AppHandle, body: &str) {
             emit_payload(&app, &final_state, title);
             // Feed the pet: the tokens Claude burned since the last read (delta),
             // plus their estimated USD cost.
-            if let Some((tokens, cost)) = crate::transcript::new_usage_delta(&path) {
-                if tokens > 0 {
+            if let Some(u) = crate::transcript::new_usage_detail(&path) {
+                if u.tokens > 0 {
                     let _ = app.emit("agent-tokens", serde_json::json!({
                         "agent": "claude", "session": tok_session,
-                        "project": tok_project, "tokens": tokens, "cost": cost,
+                        "project": tok_project, "tokens": u.tokens, "cost": u.cost,
+                        "input": u.input, "output": u.output, "cacheRead": u.cache_read, "cacheWrite": u.cache_write,
                     }));
                 }
             }

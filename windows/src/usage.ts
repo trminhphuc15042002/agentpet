@@ -16,7 +16,15 @@ interface Row {
   tokens: number;
   sessions: number;
   costUSD?: number;
+  /// Breakdown (Claude only). `tokens` stays input+output, the pet's XP basis;
+  /// cache is tracked separately and never feeds the pet.
+  inputTokens?: number;
+  outputTokens?: number;
+  cacheRead?: number;
+  cacheWrite?: number;
 }
+
+export interface Breakdown { input?: number; output?: number; cacheRead?: number; cacheWrite?: number }
 
 function fnv1a(s: string): string {
   let h = 0x811c9dc5;
@@ -67,7 +75,7 @@ function loadDirty(): Set<string> {
 }
 function saveDirty(d: Set<string>) { localStorage.setItem(DIRTY_KEY, JSON.stringify([...d])); }
 
-function record(project: string, agent: string, tokens: number, sessions: number, cost = 0) {
+function record(project: string, agent: string, tokens: number, sessions: number, cost = 0, bd: Breakdown = {}) {
   if (!project || !agent || (tokens <= 0 && sessions <= 0)) return;
   const { id, name } = projectIdentity(project);
   const day = today();
@@ -77,6 +85,10 @@ function record(project: string, agent: string, tokens: number, sessions: number
   r.tokens += tokens;
   r.sessions += sessions;
   r.costUSD = (r.costUSD || 0) + cost;
+  r.inputTokens = (r.inputTokens || 0) + (bd.input || 0);
+  r.outputTokens = (r.outputTokens || 0) + (bd.output || 0);
+  r.cacheRead = (r.cacheRead || 0) + (bd.cacheRead || 0);
+  r.cacheWrite = (r.cacheWrite || 0) + (bd.cacheWrite || 0);
   r.projectName = name;
   store[key] = r;
   prune(store);
@@ -87,7 +99,7 @@ function record(project: string, agent: string, tokens: number, sessions: number
   schedulePush();
 }
 
-export function recordTokens(project: string, agent: string, tokens: number, cost = 0) { record(project, agent, tokens, 0, cost); }
+export function recordTokens(project: string, agent: string, tokens: number, cost = 0, bd: Breakdown = {}) { record(project, agent, tokens, 0, cost, bd); }
 export function recordSession(project: string, agent: string) { record(project, agent, 0, 1); }
 
 function monthPrefix(): string {
@@ -149,7 +161,8 @@ export async function push(): Promise<void> {
     for (const s of snapshot) {
       const k = `${s.projectId}|${s.agent}|${s.day}`;
       const cur = now[k];
-      if (cur && cur.tokens === s.tokens && cur.sessions === s.sessions) still.delete(k);
+      if (cur && cur.tokens === s.tokens && cur.sessions === s.sessions && (cur.costUSD || 0) === (s.costUSD || 0)
+        && (cur.cacheRead || 0) === (s.cacheRead || 0)) still.delete(k);
     }
     saveDirty(still);
   } catch {}

@@ -53,11 +53,49 @@ fn claude_cost(model: Option<&str>, input: i64, output: i64, cache_create: i64, 
         / 1_000_000.0
 }
 
-/// Sums Claude model usage tokens (input + output) AND estimates their USD cost
-/// (per-model tier + cache rates), for lines appended to the transcript since the
-/// previous call for the same path. First call consumes the whole file. `None` if
-/// unreadable, `(0, 0.0)` if no new usage lines appeared. Feeds the pet + cost.
-pub fn new_usage_delta(path: &str) -> Option<(i64, f64)> {
+/// Claude usage appended to a transcript since the last read. `tokens` is
+/// input+output only: it is what feeds the pet (XP/level), so it must not change
+/// meaning. The breakdown and cost only feed the usage dashboard.
+#[derive(Debug, Default, Clone, Copy, PartialEq)]
+pub struct UsageDelta {
+    pub tokens: i64,
+    pub cost: f64,
+    pub input: i64,
+    pub output: i64,
+    pub cache_read: i64,
+    pub cache_write: i64,
+}
+
+/// Parses transcript JSONL lines into a `UsageDelta` (pure, unit-tested).
+pub fn sum_usage_lines(text: &str) -> UsageDelta {
+    let mut d = UsageDelta::default();
+    for line in text.lines() {
+        if !line.contains("\"usage\"") {
+            continue; // fast reject: most lines carry no usage object
+        }
+        let Ok(json) = serde_json::from_str::<Value>(line.trim()) else { continue };
+        if let Some(msg) = json.get("message") {
+            if let Some(usage) = msg.get("usage") {
+                let g = |k: &str| usage.get(k).and_then(|v| v.as_i64()).unwrap_or(0);
+                let (input, output) = (g("input_tokens"), g("output_tokens"));
+                let (cache_write, cache_read) = (g("cache_creation_input_tokens"), g("cache_read_input_tokens"));
+                d.tokens += input + output;
+                d.input += input;
+                d.output += output;
+                d.cache_write += cache_write;
+                d.cache_read += cache_read;
+                let model = msg.get("model").and_then(|v| v.as_str());
+                d.cost += claude_cost(model, input, output, cache_write, cache_read);
+            }
+        }
+    }
+    d
+}
+
+/// Usage (tokens, breakdown, estimated USD cost) for lines appended to the
+/// transcript since the previous call for the same path. First call consumes the
+/// whole file. `None` if unreadable, a zero delta if no new usage lines appeared.
+pub fn new_usage_detail(path: &str) -> Option<UsageDelta> {
     // Hold the offsets lock across the whole read + advance, so two events for
     // the same session firing at once can't both consume the same bytes (which
     // would double-feed the pet). Reads are small deltas, so serialising is fine.
@@ -71,7 +109,7 @@ pub fn new_usage_delta(path: &str) -> Option<(i64, f64)> {
         start = 0; // file truncated/replaced: start over
     }
     if size <= start {
-        return Some((0, 0.0));
+        return Some(UsageDelta::default());
     }
     f.seek(SeekFrom::Start(start)).ok()?;
     let mut buf = Vec::new();
@@ -80,33 +118,22 @@ pub fn new_usage_delta(path: &str) -> Option<(i64, f64)> {
     let nl = buf.iter().rposition(|&b| b == b'\n')?;
     let consumable = &buf[..=nl];
     offsets.insert(path.to_string(), start + consumable.len() as u64);
-    let text = String::from_utf8_lossy(consumable);
-    let mut total: i64 = 0;
-    let mut cost = 0.0;
-    for line in text.lines() {
-        if !line.contains("\"usage\"") {
-            continue; // fast reject: most lines carry no usage object
-        }
-        let Ok(json) = serde_json::from_str::<Value>(line.trim()) else { continue };
-        if let Some(msg) = json.get("message") {
-            if let Some(usage) = msg.get("usage") {
-                let input = usage.get("input_tokens").and_then(|v| v.as_i64()).unwrap_or(0);
-                let output = usage.get("output_tokens").and_then(|v| v.as_i64()).unwrap_or(0);
-                let cache_create = usage
-                    .get("cache_creation_input_tokens")
-                    .and_then(|v| v.as_i64())
-                    .unwrap_or(0);
-                let cache_read = usage
-                    .get("cache_read_input_tokens")
-                    .and_then(|v| v.as_i64())
-                    .unwrap_or(0);
-                total += input + output;
-                let model = msg.get("model").and_then(|v| v.as_str());
-                cost += claude_cost(model, input, output, cache_create, cache_read);
-            }
-        }
+    Some(sum_usage_lines(&String::from_utf8_lossy(consumable)))
+}
+
+#[cfg(test)]
+mod usage_detail_tests {
+    use super::*;
+
+    #[test]
+    fn tokens_stay_input_plus_output_and_breakdown_sums() {
+        let l1 = r#"{"message":{"model":"claude-opus-4","usage":{"input_tokens":10,"output_tokens":5,"cache_creation_input_tokens":100,"cache_read_input_tokens":1000}}}"#;
+        let l2 = r#"{"message":{"model":"claude-haiku","usage":{"input_tokens":1,"output_tokens":2}}}"#;
+        let d = sum_usage_lines(&format!("{l1}\nnot json \"usage\"\n{l2}\n"));
+        assert_eq!(d.tokens, 18); // pet XP basis: input+output only, cache excluded
+        assert_eq!((d.input, d.output, d.cache_write, d.cache_read), (11, 7, 100, 1000));
+        assert!(d.cost > 0.0);
     }
-    Some((total, cost))
 }
 
 /// Expected transcript path for a Claude Code session when the hook payload
