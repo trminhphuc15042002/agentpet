@@ -3,6 +3,7 @@
 // rotating pick per key). Phrases are intentionally English, like macOS.
 
 import { chatPool } from "./personality";
+import { limitLow } from "./limits";
 
 export type ActivityThemeName = "chef" | "engineer" | "wizard" | "explorer" | "scientist";
 
@@ -189,6 +190,13 @@ export const IDLE_BOOST = [
   "One clean diff can fix the whole afternoon.",
 ];
 
+/// Added to the idle pool while any subscription window has under 15% left (mac PetCareController.anxious).
+export const LIMIT_ANXIOUS = [
+  "Careful… your AI budget is almost gone.",
+  "Low fuel: a usage limit is nearly reached!",
+  "Maybe save some tokens for tomorrow.",
+];
+
 /// Default editable lines per mood (port of BubbleMessages.defaultLines). A
 /// non-cozy personality overrides some moods; the rest keep the shipped pools.
 export function defaultLines(mood: string): string[] {
@@ -198,7 +206,7 @@ export function defaultLines(mood: string): string[] {
     case "waiting": return PET_CHAT.waiting;
     case "done": return PET_CHAT.done;
     case "celebrate": return PET_CHAT.celebrate;
-    case "idle": return IDLE_BOOST;
+    case "idle": return limitLow() ? [...IDLE_BOOST, ...LIMIT_ANXIOUS] : IDLE_BOOST;
     default: return []; // working: blank = live activity wins
   }
 }

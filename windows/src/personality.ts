@@ -30,6 +30,9 @@ interface PersonalityOverride {
 
 /// The phrases the app shipped with (pre-personality), now the "cozy" voice.
 const DEFAULT_REACTIVE: ReactivePools = {
+  rateLimitLow: ["Usage is climbing~", "Take it easy, no rush", "Keep an eye on quota"],
+  rateLimitHigh: ["Rate limit running low.", "Use sparingly!", "Quota getting thin"],
+  rateLimitCritical: ["Almost out of quota!", "Maybe take a break.", "Quota nearly spent"],
   dailyTokensLow: ["Burned quite a few tokens today~", "Eaten a lot of tokens", "Token usage rising"],
   dailyTokensMid: ["Big appetite mode!", "Great appetite today~", "Tokens going fast"],
   dailyTokensHigh: ["Token usage off the charts today 🔥", "Token burn is extreme!", "Heavy burn today"],
@@ -125,6 +128,7 @@ const VI_CHAT: Record<PersonalityID, ChatPools> = {
 // Short native-language lines; thresholds and cooldowns remain unchanged.
 const VI_REACTIVE: Record<PersonalityID, ReactivePools> = {
   cozy: {
+    rateLimitLow: ["Hạn mức đang tăng dần nha."], rateLimitHigh: ["Hạn mức sắp cạn, dùng tiết kiệm nhé."], rateLimitCritical: ["Sắp hết hạn mức rồi, nghỉ chút nhé."],
     dailyTokensLow: ["Hôm nay cũng làm được kha khá rồi nè."], dailyTokensMid: ["Token đi nhanh quá, nhớ giữ nhịp nha."], dailyTokensHigh: ["Hôm nay dùng nhiều token rồi, nghỉ chút nhé."],
     sessionCountLow: ["Có cả một đội đang làm cùng bạn."], sessionCountHigh: ["Đông đồng đội ghê, nhớ xem ai cần bạn nha."],
     hungerLow: ["Mình hơi đói một chút."], hungerMid: ["Lâu rồi chưa có bữa mới nè."], hungerHigh: ["Khi nào bạn quay lại, mình vẫn ở đây."],
@@ -132,6 +136,7 @@ const VI_REACTIVE: Record<PersonalityID, ReactivePools> = {
     dailyMealsLow: ["Thêm vài lượt việc được hoàn thành rồi."], dailyMealsMid: ["Năm mươi lượt rồi, nghỉ tay chút nhé."], dailyMealsHigh: ["Hơn trăm lượt! Hôm nay vất vả rồi."],
   },
   tsundere: {
+    rateLimitLow: ["Hạn mức tăng rồi đấy. Để ý chút."], rateLimitHigh: ["Hạn mức sắp cạn. Đừng tiêu hoang."], rateLimitCritical: ["Sắp hết hạn mức rồi. Nghỉ đi, không phải lo cho bạn đâu."],
     dailyTokensLow: ["Có làm việc đấy. Mình thấy rồi."], dailyTokensMid: ["Token không mọc trên cây đâu nha."], dailyTokensHigh: ["Dùng nhiều rồi đó. Kiểm tra mức dùng đi."],
     sessionCountLow: ["Đông agent ghê. Đừng quên đứa nào."], sessionCountHigh: ["Cả đội quân luôn? Bạn quản nổi không?"],
     hungerLow: ["Không đói. Chỉ hơi muốn ăn thôi."], hungerMid: ["Này, lâu rồi chưa cho mình ăn đó."], hungerHigh: ["Bạn đi đâu rồi? Mình chỉ hỏi thôi."],
@@ -139,6 +144,7 @@ const VI_REACTIVE: Record<PersonalityID, ReactivePools> = {
     dailyMealsLow: ["Cũng xong được vài việc rồi."], dailyMealsMid: ["Năm mươi lượt? Nghỉ đi."], dailyMealsHigh: ["Hơn trăm lượt rồi. Đi ngủ, nghe chưa."],
   },
   chaotic: {
+    rateLimitLow: ["Hạn mức đang leo thang!"], rateLimitHigh: ["HẠN MỨC SẮP CẠN! Tiết kiệm thôi!"], rateLimitCritical: ["GẦN HẾT HẠN MỨC! NGHỈ NGƠI ĐI!"],
     dailyTokensLow: ["Lò token đã khởi động! 🔥"], dailyTokensMid: ["Nhiên liệu đang đi nhanh!"], dailyTokensHigh: ["BÁO ĐỘNG TOKEN! Kiểm tra mức dùng! 🌋"],
     sessionCountLow: ["Biệt đội agent tập hợp!"], sessionCountHigh: ["TRUNG TÂM CHỈ HUY ONLINE! 😳"],
     hungerLow: ["Tiếp tế đồ ăn đi nào!"], hungerMid: ["Bụng phát tín hiệu SOS! 🔔"], hungerHigh: ["Đội cứu hộ đồ ăn đâu rồi?!"],

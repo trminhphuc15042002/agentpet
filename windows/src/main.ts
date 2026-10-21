@@ -17,6 +17,7 @@ import * as projectpets from "./projectpets";
 import * as audio from "./audio";
 import { focusActive, WaitingReminders, sessionKey, readLastEvents } from "./companion";
 import { pettingLine } from "./personality";
+import { refreshLimits, serveLimits } from "./limits";
 
 // Which project THIS pet window represents. `null` = the main window (the
 // default single pet). Split-pet spawns extra windows with `?project=<id>`.
@@ -292,8 +293,11 @@ function maintain() {
   if (maintenanceSig(store.snapshot()) !== before) render();
 }
 
+if (IS_MAIN) { serveLimits(); void refreshLimits(); }
+
 function startUiTimers() {
   if (document.hidden) return;
+  if (IS_MAIN) void refreshLimits();
   if (!maintTimer) maintTimer = window.setInterval(maintain, 500);
   if (!clockTimer) clockTimer = window.setInterval(() => bubble.tickClocks(), 1000);
   if (!dirtyTimer) dirtyTimer = window.setInterval(() => {
@@ -302,6 +306,8 @@ function startUiTimers() {
   if (!hungerTimer) hungerTimer = window.setInterval(() => {
     const slug = myPetSlug();
     if (slug) flashReactive(reactive.evaluate("hunger", care.hunger(care.stateFor(slug))));
+    // refreshLimits no-ops inside its 5 min cache window and while the toggle is off.
+    if (IS_MAIN) void refreshLimits().then(() => flashReactive(reactive.evaluateRateLimit()));
   }, 60_000);
   bubble.resume();
 }
@@ -558,7 +564,7 @@ listen<{ slug: string; url: string }>("set-pet", (e) => {
 // Language changed from Settings , re-render the bubble in the new language.
 listen<Lang>("lang-changed", (e) => { setLang(e.payload); render(); });
 // Bubble theme / opacity / messages changed from Settings.
-listen("bubble-changed", () => { applyBubble(); applyPet(); moodLine = ""; armReminder(); render(); });
+listen("bubble-changed", () => { if (IS_MAIN) void refreshLimits(); applyBubble(); applyPet(); moodLine = ""; armReminder(); render(); });
 
 // Tray "Check for updates" (Rust emits this to the main pet window only). The
 // popover has a labelled Updates button, but on Linux appindicator can't open

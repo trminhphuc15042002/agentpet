@@ -7,6 +7,12 @@ export type Lang = "en" | "vi" | "zh" | "zh-TW";
 
 const DICT: Record<Exclude<Lang, "en">, Record<string, string>> = {
   vi: {
+    "Show subscription limits": "Hiện giới hạn gói đăng ký",
+    "Reads your local Claude login file (~/.claude/.credentials.json) and contacts only api.anthropic.com. Shows percentages only; nothing is stored or sent elsewhere.": "Đọc file đăng nhập Claude trên máy (~/.claude/.credentials.json) và chỉ kết nối api.anthropic.com. Chỉ hiển thị phần trăm; không lưu hay gửi đi nơi khác.",
+    "Session": "Phiên",
+    "Weekly": "Tuần",
+    "used": "đã dùng",
+    "resets in": "đặt lại sau",
     "Focus for 30 minutes": "Tập trung 30 phút",
     "Focusing": "Đang tập trung",
     "End focus": "Kết thúc tập trung",
@@ -275,11 +281,20 @@ const DICT: Record<Exclude<Lang, "en">, Record<string, string>> = {
     "Settings": "Cài đặt",
     "Show pet": "Hiện pet",
     "Let's grill some bugs.": "Đi săn bug nào.",
+    "Careful… your AI budget is almost gone.": "Cẩn thận, ngân sách AI sắp hết rồi.",
+    "Low fuel: a usage limit is nearly reached!": "Sắp hết nhiên liệu: một hạn mức gần chạm trần!",
+    "Maybe save some tokens for tomorrow.": "Để dành chút token cho ngày mai nhé.",
     "Tiny commit, tiny dopamine.": "Commit nhỏ, dopamine nhỏ.",
     "The build is quiet. Too quiet.": "Build im ắng quá.",
     "Ship something small.": "Ship cái gì nhỏ nhỏ đi.",
   },
   zh: {
+    "Show subscription limits": "显示订阅额度",
+    "Reads your local Claude login file (~/.claude/.credentials.json) and contacts only api.anthropic.com. Shows percentages only; nothing is stored or sent elsewhere.": "读取本地 Claude 登录文件（~/.claude/.credentials.json），仅连接 api.anthropic.com。只显示百分比，不会存储或发送到其他地方。",
+    "Session": "会话",
+    "Weekly": "每周",
+    "used": "已用",
+    "resets in": "重置于",
     "Today": "今天",
     "Month": "本月",
     "Allow": "允许",

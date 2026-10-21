@@ -1,6 +1,7 @@
 // Node 22+ self-check: node --experimental-strip-types scripts/check-companion.ts
 import assert from "node:assert/strict";
 import { focusActive, WaitingReminders, readLastEvents } from "../src/companion.ts";
+import { rateLimitKey, isFresh, mayFetch, TTL_MS, MAX_AGE_MS } from "../src/limitTiers.ts";
 import { groupSessions, type GroupConfig } from "../src/geometry.ts";
 
 assert.equal(focusActive(100, 99), true);
@@ -41,4 +42,28 @@ assert.equal(groupSessions(sessions, { ...cfg, maxSessions: 1, mode: "list" })[0
 assert.equal(groupSessions(sessions, { ...cfg, hidden: ["claude"] }).length, 1);
 assert.equal(groupSessions(sessions, { ...cfg, filter: "workingOnly" }).some((g) => g.session.session === "b"), false);
 assert.equal(groupSessions(sessions, { ...cfg, pinnedKey: "gone" }).reduce((n, g) => n + g.count, 0), 3);
-console.log("PASS companion: focus, once-per-wait reminders, sleep suppression, diagnostics parsing, pinned groups/filters/caps");
+assert.equal(rateLimitKey(null), null);
+assert.equal(rateLimitKey(NaN), null);
+assert.equal(rateLimitKey(0.51), null);
+assert.equal(rateLimitKey(0.5), "rateLimitLow");
+assert.equal(rateLimitKey(0.16), "rateLimitLow");
+assert.equal(rateLimitKey(0.15), "rateLimitHigh");
+assert.equal(rateLimitKey(0.06), "rateLimitHigh");
+assert.equal(rateLimitKey(0.05), "rateLimitCritical");
+assert.equal(rateLimitKey(0), "rateLimitCritical");
+const tt = 1_000_000;
+assert.equal(isFresh(null, tt), false);
+assert.equal(isFresh(0, 100), true);
+assert.equal(isFresh(500 - 121_000, 500), true);
+assert.equal(isFresh(500 - (MAX_AGE_MS + 1), 500), false);
+assert.equal(isFresh(tt, tt + MAX_AGE_MS), true);
+assert.equal(isFresh(tt, tt + MAX_AGE_MS + 1), false);
+assert.equal(isFresh(tt, tt + 3 * 3600_000), false);
+assert.equal(isFresh(tt, tt - 1), false);
+assert.equal(mayFetch(null, tt), true);
+assert.equal(mayFetch(0, 100), false);
+assert.equal(mayFetch(tt, tt + TTL_MS - 1), false);
+assert.equal(mayFetch(tt, tt + TTL_MS), true);
+assert.equal(mayFetch(tt, tt - 1), false);
+assert.ok(MAX_AGE_MS > TTL_MS + 60_000);
+console.log("PASS companion: limits freshness/budget, rate-limit tiers, focus, once-per-wait reminders, sleep suppression, diagnostics parsing, pinned groups/filters/caps");

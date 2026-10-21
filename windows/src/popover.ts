@@ -13,6 +13,7 @@ import { elapsedString } from "./bubble";
 import { t, setLang, type Lang } from "./i18n";
 import * as care from "./care";
 import * as sync from "./sync";
+import { cachedLimits, followLimits, requestLimits } from "./limits";
 import { savedSlug, petDisplayName, getLibrary } from "./catalog";
 import { focusActive, sessionKey } from "./companion";
 
@@ -56,6 +57,31 @@ function petName(slug: string): string {
   const custom = petDisplayName(slug);
   if (custom !== slug) return custom;
   return getLibrary().find((p) => p.slug === slug)?.name || slug;
+}
+
+function renderLimits() {
+  const row = document.getElementById("pop-limits");
+  if (!row) return;
+  const p = cachedLimits().find((x) => x.windows.length > 0);
+  if (!p) { row.hidden = true; return; }
+  const ws = [...p.windows].sort((a, b) => b.usedPct - a.usedPct);
+  const tight = ws[0], other = ws[1];
+  const pct = Math.max(0, Math.min(100, Math.round(tight.usedPct)));
+  const name = (w: { label: string }) => t(w.label === "weekly" ? "Weekly" : "Session");
+  let main = `${p.name} · ${name(tight)} · ${pct}% ${t("used")}`;
+  if (tight.resetsAtMs) {
+    const mins = Math.max(0, Math.round((tight.resetsAtMs - Date.now()) / 60000));
+    main += ` · ${t("resets in")} ${mins >= 1440 ? `${Math.floor(mins / 1440)}d ${Math.floor((mins % 1440) / 60)}h` : mins >= 60 ? `${Math.floor(mins / 60)}h` : `${mins}m`}`;
+  }
+  const setTxt = (id: string, v: string) => { const el = document.getElementById(id); if (el) el.textContent = v; };
+  setTxt("pop-limits-main", main);
+  setTxt("pop-limits-other", other ? `${name(other)} ${Math.round(other.usedPct)}%` : "");
+  const fill = document.getElementById("pop-limits-fill") as HTMLElement | null;
+  if (fill) {
+    fill.style.width = `${pct}%`;
+    fill.style.background = pct > 90 ? "var(--red)" : pct > 75 ? "var(--orange)" : "";
+  }
+  row.hidden = false;
 }
 
 function renderCare() {
@@ -362,6 +388,7 @@ listen("popover-shown", () => {
   emit("sessions-request", null);
   // Refresh the level from the linked account so the HUD shows the cloud value.
   void sync.autoRestore().then(() => paintAndFit());
+  requestLimits();
   paintAndFit();
 });
 emit("sessions-request", null);
@@ -378,9 +405,10 @@ function fitWindow() {
 }
 
 const origPaint = paint;
-function paintAndFit() { origPaint(); renderCare(); renderNeeds(); fitWindow(); }
+function paintAndFit() { origPaint(); renderCare(); renderLimits(); renderNeeds(); fitWindow(); }
 
 listen("care-updated", () => paintAndFit());
+followLimits(() => paintAndFit());
 listen<Lang>("lang-changed", (e) => { setLang(e.payload); applyStatic(); paintAndFit(); });
 setInterval(paintAndFit, 1000); // live elapsed + prune
 applyStatic();
