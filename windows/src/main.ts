@@ -485,12 +485,12 @@ listen<string>("agent-end", (e) => {
 });
 // Tokens burned by an agent feed THIS window's pet , only the owning window, so
 // split pets never double-feed the same tokens.
-listen<{ agent: string; session: string; project: string; tokens: number; cost?: number }>("agent-tokens", (e) => {
+listen<{ agent: string; session: string; project: string; tokens: number; cost?: number; input?: number; output?: number; cacheRead?: number; cacheWrite?: number }>("agent-tokens", (e) => {
   const n = e.payload?.tokens || 0;
   if (n <= 0) return;
   const p = e.payload;
   if (!ownsProject(p.project)) return;
-  if (p.project) usage.recordTokens(p.project, p.agent, n, p.cost || 0);
+  if (p.project) usage.recordTokens(p.project, p.agent, n, p.cost || 0, { input: p.input, output: p.output, cacheRead: p.cacheRead, cacheWrite: p.cacheWrite });
   const slug = myPetSlug();
   if (!slug) return;
   care.mutate(slug, (s) => care.feedTokens(s, n));
