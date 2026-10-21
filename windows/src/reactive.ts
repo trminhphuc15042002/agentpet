@@ -1,13 +1,16 @@
 // Reactive bubbles , a TypeScript port of the macOS ReactiveEngine. The pet
 // spontaneously comments on live metrics (daily tokens, session count, hunger,
-// streak, daily meals) with tiered phrases and per-metric cooldowns. The macOS
-// rate-limit metric is omitted: it needs OpenUsage data the Tauri app lacks.
+// streak, daily meals, subscription rate limit) with tiered phrases and per-metric
+// cooldowns. The rate-limit metric comes from the native Claude probe (limits.ts),
+// opt-in via the subscription limits toggle.
 
 import { t } from "./i18n";
 import { reactivePool, cooldownScale } from "./personality";
 import type { Hunger } from "./care";
+import { lowestFractionLeft } from "./limits";
+import { rateLimitKey } from "./limitTiers";
 
-export type Metric = "dailyTokens" | "sessionCount" | "hunger" | "streak" | "dailyMeals";
+export type Metric = "dailyTokens" | "sessionCount" | "hunger" | "streak" | "dailyMeals" | "rateLimit";
 
 const TH = {
   dailyTokens: { silent: 1_000_000, low: 3_000_000, mid: 6_000_000 },
@@ -51,6 +54,10 @@ function checkCooldown(metric: Metric, now: number): boolean {
 
 function pool(metric: Metric, value: number | Hunger): string[] | null {
   switch (metric) {
+    case "rateLimit": {
+      const key = rateLimitKey(value as number);
+      return key ? reactivePool(key) : null;
+    }
     case "dailyTokens": {
       const v = value as number;
       if (v < TH.dailyTokens.silent) return null;
@@ -88,6 +95,12 @@ function pool(metric: Metric, value: number | Hunger): string[] | null {
       return reactivePool("dailyMealsHigh");
     }
   }
+}
+
+/// Rate-limit comment from the cached limits; null when the toggle is off or data is empty.
+export function evaluateRateLimit(now = Date.now()): string | null {
+  const left = lowestFractionLeft();
+  return left == null ? null : evaluate("rateLimit", left, now);
 }
 
 export function enabled(): boolean {

@@ -771,6 +771,9 @@ function initBubble() {
   const reactive = document.getElementById("reactive") as HTMLInputElement;
   reactive.checked = localStorage.getItem("ap_reactive") !== "0";
   reactive.onchange = () => { localStorage.setItem("ap_reactive", reactive.checked ? "1" : "0"); changed(); };
+  const limits = document.getElementById("limits") as HTMLInputElement;
+  limits.checked = localStorage.getItem("ap_limits") === "1";
+  limits.onchange = () => { if (limits.checked) localStorage.setItem("ap_limits_on_at", String(Date.now())); localStorage.setItem("ap_limits", limits.checked ? "1" : "0"); changed(); };
 
   const split = document.getElementById("split") as HTMLInputElement;
   const splitList = document.getElementById("split-list") as HTMLElement;
@@ -1312,6 +1315,8 @@ function applyStatic() {
   set("t-idle-sub", "The pet's chatter while no agent is running.");
   set("t-reactive", "Reactive comments");
   set("t-reactive-sub", "The pet reacts to token usage, streaks, hunger, and busy sessions.");
+  set("t-limits", "Show subscription limits");
+  set("t-limits-sub", "Reads your local Claude login file (~/.claude/.credentials.json) and contacts only api.anthropic.com. Shows percentages only; nothing is stored or sent elsewhere.");
   set("t-split", "Split pets by project");
   set("t-split-sub", "Give a project its own pet window; the rest stay on the main pet.");
   set("t-display", "Display");
