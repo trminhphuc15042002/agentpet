@@ -153,14 +153,16 @@ not the Windows package version. This fork's Windows package is `0.1.13`.
 - Native occlusion/sleep behavior is not ported.
 - The macOS quota-token fallback and macOS Settings fix are not Windows support
   promises.
-- Subscription limits (Claude only) are opt-in and off by default
+- Subscription limits (Claude and Codex) are opt-in and off by default
   (Settings → "Show subscription limits"). When on, AgentPet reads
-  `%USERPROFILE%\.claude\.credentials.json` read-only (it never writes or
-  refreshes the token), contacts only `https://api.anthropic.com/api/oauth/usage`
-  over HTTPS at most once every 5 minutes, shows percentages and reset time
-  only, and stores nothing. No OpenUsage is needed. The pet reacts at
-  50% / 15% / 5% budget left. Codex limits, jcode and the OpenUsage fallback
-  are not ported.
+  `%USERPROFILE%\.claude\.credentials.json` and
+  `%USERPROFILE%\.codex\auth.json` (else `%USERPROFILE%\.config\codex\auth.json`)
+  read-only (it never writes or refreshes tokens), contacts only
+  `https://api.anthropic.com/api/oauth/usage` and
+  `https://chatgpt.com/backend-api/wham/usage` over HTTPS at most once every
+  5 minutes, shows percentages and reset time only, and stores nothing. No
+  OpenUsage is needed. The pet reacts at 50% / 15% / 5% budget left. jcode and
+  the OpenUsage fallback are not ported.
 
 ### Native regression check (Windows, Node 22+)
 
