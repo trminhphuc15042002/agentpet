@@ -67,7 +67,8 @@ Trạng thái: ✅ có rồi · 🔧 đang port đợt này · ⏳ để đợt 
 | Pet: hero + browse + import + size | ✓ | ✅ |
 | Animations: gán clip cho từng mood (PetBindings) | ✓ | ✅ (5 mood × 9 animation) |
 | Create pet (đặt tên → local pack) + delete | ✓ | ✅ import giữ tên file làm tên pet |
-| Onboarding 3 bước | ✓ | ⏳ (mở Settings lần đầu) |
+| Onboarding | ✓ | ✅ (mở Settings với welcome overlay ở lần chạy đầu) |
+| Limits (subscription) | ✓ | ✅ Claude, opt-in (native probe, tắt mặc định); Codex ⏳; OpenUsage ➖ không cần |
 | Segmented controls + bold headers + About pills + icon app từ icns mac | ✓ | ✅ đối chiếu screenshot từng tab |
 | Multi-agent bubble toggle (off = simple bubble) | ✓ | ✅ |
 | Live preview panel (demo webhook đa agent) | ✓ | ✅ FULL panel (stage + quick scenarios + webhook list + add column, cửa sổ nở 640→1380) |
