@@ -13,6 +13,8 @@ name = "agentpet"
 version = "0.1.15"
 dependencies = [
  "dirs 5.0.1",
+ "reqwest",
+ "rustls",
  "serde",
  "serde_json",
  "tauri",

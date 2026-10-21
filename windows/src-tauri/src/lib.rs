@@ -1,6 +1,7 @@
 pub mod cli;
 pub mod geometry;
 pub mod hooks;
+pub mod limits;
 pub mod server;
 pub mod statemap;
 pub mod transcript;
@@ -864,6 +865,7 @@ pub fn run() {
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
         .invoke_handler(tauri::generate_handler![
+            limits::usage_limits,
             list_agents,
             is_installed,
             toggle_install,
