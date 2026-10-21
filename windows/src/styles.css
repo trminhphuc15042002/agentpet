@@ -899,8 +899,11 @@ body.pop {
 .care-stage { opacity: .7; font-size: 12px; margin-top: 2px; }
 .care-hunger { font-size: 12px; opacity: .8; white-space: nowrap; }
 .care-bar { height: 8px; border-radius: 999px; background: rgba(127,127,127,.22); overflow: hidden; }
-.pop-limits { margin: 6px 0; }
+.pop-limits { margin: 6px 0; padding: 0 20px; }
 .pop-limits > div + div { margin-top: 6px; }
+.pop-limits .care-xprow { gap: 8px; white-space: nowrap; margin-bottom: 2px; }
+.pop-limits .care-bar + .care-xprow { justify-content: flex-end; margin: 2px 0 0; font-size: 11px; }
+.pop-limits .care-xprow > span:first-child { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .care-bar-fill { height: 100%; width: 0; background: #f5a623; border-radius: 999px; transition: width .3s ease; }
 .care-xprow { display: flex; justify-content: space-between; font-size: 12px; }
 .care-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }

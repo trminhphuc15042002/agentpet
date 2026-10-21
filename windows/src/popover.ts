@@ -71,23 +71,26 @@ function renderLimits() {
     const ws = [...p.windows].sort((a, b) => b.usedPct - a.usedPct);
     const tight = ws[0], other = ws[1];
     const pct = Math.max(0, Math.min(100, Math.round(tight.usedPct)));
-    let main = `${p.name} · ${name(tight)} · ${pct}% ${t("used")}`;
+    const main = `${p.name} · ${name(tight)} ${pct}%`;
+    let reset = "";
     if (tight.resetsAtMs) {
       const mins = Math.max(0, Math.round((tight.resetsAtMs - Date.now()) / 60000));
-      main += ` · ${t("resets in")} ${mins >= 1440 ? `${Math.floor(mins / 1440)}d ${Math.floor((mins % 1440) / 60)}h` : mins >= 60 ? `${Math.floor(mins / 60)}h` : `${mins}m`}`;
+      reset = `${t("resets in")} ${mins >= 1440 ? `${Math.floor(mins / 1440)}d ${Math.floor((mins % 1440) / 60)}h` : mins >= 60 ? `${Math.floor(mins / 60)}h` : `${mins}m`}`;
     }
     const el = (cls: string, text?: string) => { const e = document.createElement("div"); e.className = cls; if (text !== undefined) e.textContent = text; return e; };
     const wrap = document.createElement("div");
     const xp = el("care-xprow");
     const m = document.createElement("span"); m.textContent = main;
-    const o = document.createElement("span"); o.className = "dim"; o.textContent = other ? `${name(other)} ${Math.round(other.usedPct)}%` : "";
+    const o = document.createElement("span"); o.className = "dim"; o.textContent = reset;
     xp.append(m, o);
+    const sub = other ? el("care-xprow dim", `${name(other)} ${Math.round(other.usedPct)}%`) : null;
     const bar = el("care-bar");
     const fill = el("care-bar-fill");
     fill.style.width = `${pct}%`;
     fill.style.background = pct > 90 ? "var(--red)" : pct > 75 ? "var(--orange)" : "";
     bar.append(fill);
     wrap.append(xp, bar);
+    if (sub) wrap.append(sub);
     return wrap;
   }));
   row.hidden = false;
