@@ -8,7 +8,7 @@ export type Lang = "en" | "vi" | "zh" | "zh-TW";
 const DICT: Record<Exclude<Lang, "en">, Record<string, string>> = {
   vi: {
     "Show subscription limits": "Hiện giới hạn gói đăng ký",
-    "Reads your local Claude login file (~/.claude/.credentials.json) and contacts only api.anthropic.com. Shows percentages only; nothing is stored or sent elsewhere.": "Đọc file đăng nhập Claude trên máy (~/.claude/.credentials.json) và chỉ kết nối api.anthropic.com. Chỉ hiển thị phần trăm; không lưu hay gửi đi nơi khác.",
+    "Reads your local Claude and Codex login files (~/.claude/.credentials.json, ~/.codex/auth.json or ~/.config/codex/auth.json) and contacts only api.anthropic.com and chatgpt.com. Shows percentages only; nothing is stored or sent elsewhere.": "Đọc các file đăng nhập Claude và Codex trên máy (~/.claude/.credentials.json, ~/.codex/auth.json hoặc ~/.config/codex/auth.json) và chỉ kết nối api.anthropic.com và chatgpt.com. Chỉ hiển thị phần trăm; không lưu hay gửi đi nơi khác.",
     "Session": "Phiên",
     "Weekly": "Tuần",
     "used": "đã dùng",
@@ -290,7 +290,7 @@ const DICT: Record<Exclude<Lang, "en">, Record<string, string>> = {
   },
   zh: {
     "Show subscription limits": "显示订阅额度",
-    "Reads your local Claude login file (~/.claude/.credentials.json) and contacts only api.anthropic.com. Shows percentages only; nothing is stored or sent elsewhere.": "读取本地 Claude 登录文件（~/.claude/.credentials.json），仅连接 api.anthropic.com。只显示百分比，不会存储或发送到其他地方。",
+    "Reads your local Claude and Codex login files (~/.claude/.credentials.json, ~/.codex/auth.json or ~/.config/codex/auth.json) and contacts only api.anthropic.com and chatgpt.com. Shows percentages only; nothing is stored or sent elsewhere.": "读取本地 Claude 和 Codex 登录文件（~/.claude/.credentials.json、~/.codex/auth.json 或 ~/.config/codex/auth.json），仅连接 api.anthropic.com 和 chatgpt.com。只显示百分比，不会存储或发送到其他地方。",
     "Session": "会话",
     "Weekly": "每周",
     "used": "已用",

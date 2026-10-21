@@ -62,25 +62,34 @@ function petName(slug: string): string {
 function renderLimits() {
   const row = document.getElementById("pop-limits");
   if (!row) return;
-  const p = cachedLimits().find((x) => x.windows.length > 0);
-  if (!p) { row.hidden = true; return; }
-  const ws = [...p.windows].sort((a, b) => b.usedPct - a.usedPct);
-  const tight = ws[0], other = ws[1];
-  const pct = Math.max(0, Math.min(100, Math.round(tight.usedPct)));
+  const order = ["claude", "codex"];
+  const rank = (id: string) => { const i = order.indexOf(id); return i < 0 ? order.length : i; };
+  const ps = cachedLimits().filter((x) => x.windows.length > 0).sort((a, b) => rank(a.id) - rank(b.id));
+  if (!ps.length) { row.replaceChildren(); row.hidden = true; return; }
   const name = (w: { label: string }) => t(w.label === "weekly" ? "Weekly" : "Session");
-  let main = `${p.name} · ${name(tight)} · ${pct}% ${t("used")}`;
-  if (tight.resetsAtMs) {
-    const mins = Math.max(0, Math.round((tight.resetsAtMs - Date.now()) / 60000));
-    main += ` · ${t("resets in")} ${mins >= 1440 ? `${Math.floor(mins / 1440)}d ${Math.floor((mins % 1440) / 60)}h` : mins >= 60 ? `${Math.floor(mins / 60)}h` : `${mins}m`}`;
-  }
-  const setTxt = (id: string, v: string) => { const el = document.getElementById(id); if (el) el.textContent = v; };
-  setTxt("pop-limits-main", main);
-  setTxt("pop-limits-other", other ? `${name(other)} ${Math.round(other.usedPct)}%` : "");
-  const fill = document.getElementById("pop-limits-fill") as HTMLElement | null;
-  if (fill) {
+  row.replaceChildren(...ps.map((p) => {
+    const ws = [...p.windows].sort((a, b) => b.usedPct - a.usedPct);
+    const tight = ws[0], other = ws[1];
+    const pct = Math.max(0, Math.min(100, Math.round(tight.usedPct)));
+    let main = `${p.name} · ${name(tight)} · ${pct}% ${t("used")}`;
+    if (tight.resetsAtMs) {
+      const mins = Math.max(0, Math.round((tight.resetsAtMs - Date.now()) / 60000));
+      main += ` · ${t("resets in")} ${mins >= 1440 ? `${Math.floor(mins / 1440)}d ${Math.floor((mins % 1440) / 60)}h` : mins >= 60 ? `${Math.floor(mins / 60)}h` : `${mins}m`}`;
+    }
+    const el = (cls: string, text?: string) => { const e = document.createElement("div"); e.className = cls; if (text !== undefined) e.textContent = text; return e; };
+    const wrap = document.createElement("div");
+    const xp = el("care-xprow");
+    const m = document.createElement("span"); m.textContent = main;
+    const o = document.createElement("span"); o.className = "dim"; o.textContent = other ? `${name(other)} ${Math.round(other.usedPct)}%` : "";
+    xp.append(m, o);
+    const bar = el("care-bar");
+    const fill = el("care-bar-fill");
     fill.style.width = `${pct}%`;
     fill.style.background = pct > 90 ? "var(--red)" : pct > 75 ? "var(--orange)" : "";
-  }
+    bar.append(fill);
+    wrap.append(xp, bar);
+    return wrap;
+  }));
   row.hidden = false;
 }
 

@@ -1316,7 +1316,7 @@ function applyStatic() {
   set("t-reactive", "Reactive comments");
   set("t-reactive-sub", "The pet reacts to token usage, streaks, hunger, and busy sessions.");
   set("t-limits", "Show subscription limits");
-  set("t-limits-sub", "Reads your local Claude login file (~/.claude/.credentials.json) and contacts only api.anthropic.com. Shows percentages only; nothing is stored or sent elsewhere.");
+  set("t-limits-sub", "Reads your local Claude and Codex login files (~/.claude/.credentials.json, ~/.codex/auth.json or ~/.config/codex/auth.json) and contacts only api.anthropic.com and chatgpt.com. Shows percentages only; nothing is stored or sent elsewhere.");
   set("t-split", "Split pets by project");
   set("t-split-sub", "Give a project its own pet window; the rest stay on the main pet.");
   set("t-display", "Display");
