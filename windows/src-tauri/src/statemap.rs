@@ -106,6 +106,15 @@ pub fn state(kind: &str, event: &str) -> Option<&'static str> {
             "turn_end" => Some("done"),
             _ => None,
         },
+        // Hermes Agent observer hooks. `pre_tool_call` is Hermes' only blocking
+        // event and the pet has nothing to veto, so it is not installed.
+        "hermes" => match event {
+            "on_session_start" => Some("registered"),
+            "pre_llm_call" | "post_tool_call" | "subagent_start" => Some("working"),
+            "pre_approval_request" | "on_human_input_request" => Some("waiting"),
+            "post_llm_call" => Some("done"),
+            _ => None,
+        },
         _ => None,
     }
 }
@@ -115,13 +124,27 @@ pub fn is_session_end(kind: &str, event: &str) -> bool {
     matches!(
         (kind, event),
         ("claude", "SessionEnd") | ("gemini", "SessionEnd") | ("cursor", "sessionEnd") | ("droid", "SessionEnd")
-            | ("grok", "session_end") | ("jcode", "session_end")
+            | ("grok", "session_end") | ("jcode", "session_end") | ("hermes", "on_session_end")
     )
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn hermes_lifecycle() {
+        assert_eq!(state("hermes", "on_session_start"), Some("registered"));
+        assert_eq!(state("hermes", "pre_llm_call"), Some("working"));
+        assert_eq!(state("hermes", "post_tool_call"), Some("working"));
+        assert_eq!(state("hermes", "pre_approval_request"), Some("waiting"));
+        assert_eq!(state("hermes", "on_human_input_request"), Some("waiting"));
+        assert_eq!(state("hermes", "post_llm_call"), Some("done"));
+        // Blocking tool gate is never installed.
+        assert_eq!(state("hermes", "pre_tool_call"), None);
+        assert!(is_session_end("hermes", "on_session_end"));
+        assert!(!is_session_end("hermes", "post_llm_call"));
+    }
 
     #[test]
     fn jcode_lifecycle() {

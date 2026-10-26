@@ -83,7 +83,7 @@ session pinning (◇ in the popover), optional once-per-wait reminders, connecti
 diagnostics, Vietnamese personality voices and a two-second petting interaction.
 See [behavior and limits](../docs/specs/2026-10-02-lightweight-companion.md).
 
-- 13 agents, matching the Rust hook catalog.
+- 14 agents, matching the Rust hook catalog.
 - Pet picker (search / random) + "use your own spritesheet".
 - Bubble customization: theme (dark/light/system), opacity, font size/family,
   themed phrases, per-agent custom messages, idle chatter toggle.
@@ -136,10 +136,15 @@ npm run tauri build    # NSIS installer + MSI in src-tauri/target/release/bundle
 | Pi             | `~/.pi/agent/extensions/agentpet.ts`         | extension; no needs-input hook |
 | Grok Build     | `~/.grok/hooks/agentpet.json`                | Claude-compatible hooks |
 | jcode          | `~/.jcode/config.toml`                       | observer lifecycle: `session_start`, `turn_start`, `post_tool`, `turn_end`, `session_end`; no blocking `pre_tool` |
+| Hermes Agent   | `%LOCALAPPDATA%\hermes\config.yaml` + every `profiles/*/config.yaml` | YAML `hooks:` block; AgentPet's hook is also added to Hermes' consent allowlist (`shell-hooks-allowlist.json`) per profile. A turn that ends on a question shows "needs input" (reuses the Claude `QuestionDetector`). No blocking `pre_tool_call` |
 
-The Settings window exposes the per-agent hook install toggle, including jcode.
-jcode installation preserves unrelated TOML; a conflicting existing scalar hook
-or array/table hooks representation fails closed without overwriting the file.
+The Settings window exposes the per-agent hook install toggle, including jcode and
+Hermes. jcode installation preserves unrelated TOML; a conflicting existing scalar
+hook or array/table hooks representation fails closed without overwriting the file.
+Hermes installation preserves the comment-heavy `config.yaml` line-wise, keeps
+foreign hooks (appending to a shared event's list), and fails closed on an inline
+`hooks: {...}` value. Installed state means every Hermes profile home carries the
+hook; Remove deletes our entries and their allowlist approvals only.
 
 ## Upstream parity scope
 

@@ -1,6 +1,6 @@
 # macOS → Windows parity matrix
 
-Đối chiếu từng chức năng sau khi đọc toàn bộ 9.010 dòng Swift (Sources/App + AgentPetCore); catalog Rust hiện có 13 agents.
+Đối chiếu từng chức năng sau khi đọc toàn bộ 9.010 dòng Swift (Sources/App + AgentPetCore); catalog Rust hiện có 14 agents.
 Trạng thái: ✅ có rồi · 🔧 đang port đợt này · ⏳ để đợt sau · ➖ không áp dụng trên Windows.
 
 ## Event pipeline (Core)
@@ -8,6 +8,7 @@ Trạng thái: ✅ có rồi · 🔧 đang port đợt này · ⏳ để đợt 
 |---|---|---|
 | Hook CLI → app (socket/HTTP) | unix socket | ✅ HTTP 127.0.0.1:47628; JSON stdin, ngoại lệ jcode dùng `JCODE_HOOK_*` env |
 | jcode lifecycle observers (`~/.jcode/config.toml`) | ✓ | ✅ Settings toggle; `session_start`/`turn_start`/`post_tool`/`turn_end`/`session_end`, không dùng `pre_tool` blocking |
+| Hermes Agent shell hooks (`%LOCALAPPDATA%\hermes\config.yaml` + `profiles/*/config.yaml`) | — (chưa có trên mac) | ✅ Settings toggle; sửa YAML theo dòng, tự ghi consent `shell-hooks-allowlist.json` từng home; observer events (`on_session_start`/`pre_llm_call`/`post_tool_call`/`pre_approval_request`/`on_human_input_request`/`post_llm_call`/`on_session_end`), không dùng `pre_tool_call` blocking. `post_llm_call` + câu hỏi cuối → waiting (dùng lại QuestionDetector) |
 | State mapping (StateMapper) | ✓ | ✅ ported |
 | Session store + prune (done 30s, stale 300s/90s) | ✓ | ✅ ported |
 | Offline queue (hook chạy khi app tắt → replay) | ✓ | ✅ queue file + drain (đã test) |

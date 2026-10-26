@@ -64,7 +64,7 @@ pub fn run_hook(args: &[String]) {
 
     // Antigravity sends no event-name field; infer state from discriminator fields
     // (mirrors AntigravityHookPayload.makeEvent in the macOS core).
-    let event = if agent == "antigravity" {
+    let mut event = if agent == "antigravity" {
         if v.get("terminationReason").is_some() || v.get("fullyIdle").is_some() {
             Some("done".to_string())
         } else if v.get("toolCall").is_some()
@@ -78,6 +78,13 @@ pub fn run_hook(args: &[String]) {
     } else {
         first_str(&v, &["hook_event_name", "agent_action_name", "hookEventName", "eventName"])
     };
+    // Hermes has no "needs input" hook for a turn that simply ends with a
+    // question, so refine its turn-end event the way jcode's is refined.
+    if agent == "hermes" {
+        if let Some(refined) = event.take().map(|e| hermes_turn_event(&v, e)) {
+            event = Some(refined);
+        }
+    }
     let session = first_str(&v, &["session_id", "conversation_id", "trajectory_id", "sessionId", "conversationId"]);
     let project = first_str(&v, &["cwd", "projectRoot"])
         .or_else(|| {
@@ -362,6 +369,36 @@ fn parse_jcode_hook(get: impl Fn(&str) -> Option<String>) -> Option<JcodeHook> {
     })
 }
 
+/// Hermes promotes only tool/session keys, so the turn's final assistant text
+/// arrives under `extra`. A turn that ends by asking the user something is
+/// reported as `waiting`, like Claude's Stop refinement and jcode's turn_end.
+fn hermes_turn_event(v: &Value, event: String) -> String {
+    if event != "post_llm_call" {
+        return event;
+    }
+    let text = v
+        .get("extra")
+        .and_then(|e| e.get("assistant_response"))
+        .or_else(|| v.get("assistant_response"))
+        .map(|x| match x {
+            Value::String(s) => s.clone(),
+            // Some providers deliver content parts; join their text so the
+            // detector sees the sentence the user sees.
+            Value::Array(parts) => parts
+                .iter()
+                .filter_map(|p| p.get("text").and_then(|t| t.as_str()))
+                .collect::<Vec<_>>()
+                .join("\n"),
+            other => other.as_str().unwrap_or_default().to_string(),
+        })
+        .unwrap_or_default();
+    if crate::transcript::looks_like_question(&text) {
+        "waiting".to_string()
+    } else {
+        event
+    }
+}
+
 fn flag(args: &[String], name: &str) -> Option<String> {
     let mut it = args.iter();
     while let Some(a) = it.next() {
@@ -385,6 +422,7 @@ pub(super) fn first_str(v: &Value, keys: &[&str]) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    use super::hermes_turn_event;
     use serde_json::json;
 
     fn infer_antigravity_event(v: &serde_json::Value) -> Option<String> {
@@ -553,6 +591,46 @@ mod tests {
             ("JCODE_HOOK_LAST_ASSISTANT_TEXT", "Which one should I use?"),
         ]).expect("event");
         assert_eq!(e.event, "turn_end");
+    }
+
+    #[test]
+    fn hermes_turn_ending_on_question_is_waiting() {
+        let v = json!({
+            "hook_event_name": "post_llm_call",
+            "session_id": "s",
+            "extra": { "assistant_response": "Fixed the tests. Should I also update the docs?" },
+        });
+        let event = hermes_turn_event(&v, "post_llm_call".into());
+        assert_eq!(event, "waiting");
+        assert_eq!(crate::statemap::state("hermes", &event), Some("waiting"));
+    }
+
+    #[test]
+    fn hermes_turn_ending_with_summary_is_done() {
+        let v = json!({
+            "hook_event_name": "post_llm_call",
+            "session_id": "s",
+            "extra": { "assistant_response": "Fixed the bug, all 111 tests pass." },
+        });
+        let event = hermes_turn_event(&v, "post_llm_call".into());
+        assert_eq!(event, "post_llm_call");
+        assert_eq!(crate::statemap::state("hermes", &event), Some("done"));
+    }
+
+    #[test]
+    fn hermes_question_detection_ignores_other_events_and_missing_text() {
+        // Approval/waiting events must not be touched, and a payload without the
+        // assistant text stays as it is.
+        let v = json!({ "hook_event_name": "pre_approval_request", "session_id": "s" });
+        assert_eq!(hermes_turn_event(&v, "pre_approval_request".into()), "pre_approval_request");
+        let empty = json!({ "hook_event_name": "post_llm_call", "session_id": "s" });
+        assert_eq!(hermes_turn_event(&empty, "post_llm_call".into()), "post_llm_call");
+        // Content parts (non-string responses) are read too.
+        let parts = json!({
+            "hook_event_name": "post_llm_call",
+            "extra": { "assistant_response": [{ "type": "text", "text": "Which file should I edit?" }] },
+        });
+        assert_eq!(hermes_turn_event(&parts, "post_llm_call".into()), "waiting");
     }
 }
 
