@@ -25,6 +25,7 @@ enum Style {
     OpencodePlugin,    // a JS plugin file
     PiExtension,       // a TS extension file for Pi (~/.pi/agent/extensions)
     JcodeToml,         // ~/.jcode/config.toml [hooks] key = "command"
+    HermesYaml,        // Hermes config.yaml `hooks:` block: event -> [{command:..}]
 }
 
 struct Spec {
@@ -66,6 +67,12 @@ fn spec(kind: &str) -> Option<Spec> {
         // is deliberately not used.
         "jcode" => Spec { style: Style::JcodeToml, rel_path: &[".jcode", "config.toml"],
             events: &["session_start", "turn_start", "post_tool", "turn_end", "session_end"] },
+        // Hermes Agent (Nous Research): shell hooks in config.yaml, one home per
+        // profile. `pre_tool_call` is the only blocking event, so the pet uses
+        // observers only (turn start/tool end/done) rather than gating tools.
+        "hermes" => Spec { style: Style::HermesYaml, rel_path: &["hermes", "config.yaml"],
+            events: &["on_session_start", "pre_llm_call", "post_tool_call", "pre_approval_request",
+                "on_human_input_request", "post_llm_call", "on_session_end"] },
         _ => return None,
     })
 }
@@ -85,6 +92,7 @@ pub fn catalog() -> Vec<AgentInfo> {
         ("pi", "Pi", Some("Pi extension (~/.pi/agent/extensions). No \"needs input\" alerts")),
         ("grok", "Grok Build", Some("xAI Grok Build CLI (~/.grok/hooks/agentpet.json)")),
         ("jcode", "jcode", Some("jcode lifecycle hooks (~/.jcode/config.toml)")),
+        ("hermes", "Hermes Agent", Some("Hermes Agent CLI (%LOCALAPPDATA%\\hermes\\config.yaml, all profiles)")),
     ];
     entries.iter().map(|(kind, name, note)| AgentInfo {
         kind: kind.to_string(),
@@ -95,9 +103,19 @@ pub fn catalog() -> Vec<AgentInfo> {
 }
 
 fn config_path(kind: &str) -> Option<PathBuf> {
+    // Hermes keeps one home per profile, so it has its own path resolver.
+    if kind == "hermes" { return None; }
     let mut p = dirs::home_dir()?;
     for part in spec(kind)?.rel_path { p.push(part); }
     Some(p)
+}
+
+/// Every config file this agent reads. Install/uninstall touch all of them:
+/// Hermes gives each profile its own home, so hooking only the base home would
+/// miss `forge`/`worker-*`/... sessions.
+fn config_paths(kind: &str) -> Vec<PathBuf> {
+    if kind == "hermes" { return hermes::config_paths(); }
+    config_path(kind).into_iter().collect()
 }
 
 fn hook_command() -> String {
@@ -154,13 +172,24 @@ fn make_entry(style: Style, event: &str, cmd: &str) -> Value {
         } else {
             json!({ "type": "command", "command": cmd })
         },
-        Style::OpencodePlugin | Style::PiExtension | Style::JcodeToml => Value::Null,
+        Style::OpencodePlugin | Style::PiExtension | Style::JcodeToml | Style::HermesYaml => Value::Null,
     }
 }
 
 // ----- public API ----------------------------------------------------------
 pub fn is_installed(kind: &str) -> bool {
-    let (Some(path), Some(s)) = (config_path(kind), spec(kind)) else { return false };
+    let Some(s) = spec(kind) else { return false };
+    if s.style == Style::HermesYaml {
+        // Installed only when every home Hermes reads carries the hook; a new
+        // profile otherwise leaves the pet blind with the toggle still "on".
+        let paths = config_paths(kind);
+        return !paths.is_empty() && paths.iter().all(|p| {
+            std::fs::read_to_string(p)
+                .map(|text| hermes::is_installed(&text, s.events))
+                .unwrap_or(false)
+        });
+    }
+    let Some(path) = config_path(kind) else { return false };
     if s.style == Style::JcodeToml {
         return jcode::read_or_empty(&path)
             .map(|text| jcode::is_installed(&text, s.events))
@@ -189,10 +218,18 @@ pub fn toggle(kind: &str) -> Result<bool, String> {
 }
 
 fn install(kind: &str) -> std::io::Result<()> {
-    let (Some(path), Some(s)) = (config_path(kind), spec(kind)) else {
+    let Some(s) = spec(kind) else {
         return Err(std::io::Error::new(std::io::ErrorKind::Other, "unknown agent"));
     };
     let cmd = full_command(kind);
+
+    if s.style == Style::HermesYaml {
+        return hermes::install_all(&config_paths(kind), &cmd, s.events);
+    }
+
+    let Some(path) = config_path(kind) else {
+        return Err(std::io::Error::new(std::io::ErrorKind::Other, "unknown agent"));
+    };
 
     if s.style == Style::OpencodePlugin {
         if let Some(dir) = path.parent() { std::fs::create_dir_all(dir)?; }
@@ -240,7 +277,12 @@ fn install(kind: &str) -> std::io::Result<()> {
 }
 
 fn uninstall(kind: &str) -> std::io::Result<()> {
-    let (Some(path), Some(s)) = (config_path(kind), spec(kind)) else { return Ok(()) };
+    let Some(s) = spec(kind) else { return Ok(()) };
+    let cmd = full_command(kind);
+    if s.style == Style::HermesYaml {
+        return hermes::uninstall_all(&config_paths(kind), &cmd, s.events);
+    }
+    let Some(path) = config_path(kind) else { return Ok(()) };
     if s.style == Style::JcodeToml {
         return jcode::uninstall_from_disk(&path, s.events);
     }
@@ -959,6 +1001,451 @@ mod jcode {
     }
 }
 
+/// Hermes Agent (Nous Research) integration. Unlike the other agents Hermes
+/// keeps a YAML config per profile and refuses to run a shell hook that is not
+/// in its per-home consent allowlist, so install covers every home and approves
+/// the hook there too. `config.yaml` is user-owned and comment-heavy, so it is
+/// edited line-wise (same approach as jcode's TOML) and foreign hooks are kept.
+mod hermes {
+    use super::{is_ours, jcode::write_atomic};
+    use serde_json::{json, Value};
+    use std::path::{Path, PathBuf};
+
+    pub const ALLOWLIST: &str = "shell-hooks-allowlist.json";
+
+    /// Hermes home: `HERMES_HOME` override, else `%LOCALAPPDATA%\hermes`
+    /// (`~/.hermes` on macOS/Linux).
+    pub fn root() -> Option<PathBuf> {
+        if let Ok(home) = std::env::var("HERMES_HOME") {
+            let home = home.trim();
+            if !home.is_empty() { return Some(PathBuf::from(home)); }
+        }
+        dirs::data_local_dir().map(|p| p.join("hermes"))
+    }
+
+    /// Base home first, then every profile home that already has a config file.
+    /// Profiles without one are left alone rather than created.
+    pub fn config_paths() -> Vec<PathBuf> {
+        let Some(root) = root() else { return Vec::new() };
+        let mut paths = vec![root.join("config.yaml")];
+        let mut profiles: Vec<PathBuf> = std::fs::read_dir(root.join("profiles"))
+            .map(|rd| {
+                rd.filter_map(|e| e.ok())
+                    .map(|e| e.path())
+                    .filter(|p| p.is_dir() && p.join("config.yaml").is_file())
+                    .collect()
+            })
+            .unwrap_or_default();
+        profiles.sort();
+        paths.extend(profiles.into_iter().map(|p| p.join("config.yaml")));
+        paths
+    }
+
+    // ----- config.yaml `hooks:` block -------------------------------------
+
+    fn strip_cr(line: &str) -> &str { line.strip_suffix('\r').unwrap_or(line) }
+
+    /// Top-level `hooks:` with no inline value (a value on the same line is a
+    /// representation we do not edit).
+    fn is_hooks_header(line: &str) -> bool {
+        if line.starts_with(' ') || line.starts_with('\t') { return false; }
+        let t = strip_cr(line).trim_end();
+        t.split('#').next().unwrap_or("").trim_end() == "hooks:"
+    }
+
+    /// `hooks: {...}` / `hooks: null` on one line.
+    fn inline_value(line: &str) -> Option<String> {
+        if line.starts_with(' ') || line.starts_with('\t') { return None; }
+        let t = strip_cr(line).trim_end();
+        let rest = t.strip_prefix("hooks:")?.trim_start();
+        if rest.is_empty() || rest.starts_with('#') { None } else { Some(rest.to_string()) }
+    }
+
+    fn hooks_block(lines: &[String]) -> Option<(usize, usize)> {
+        let header = lines.iter().position(|l| is_hooks_header(l))?;
+        let mut end = header + 1;
+        while end < lines.len() {
+            let t = strip_cr(&lines[end]);
+            let trimmed = t.trim();
+            let indented = t.starts_with(' ') || t.starts_with('\t');
+            if !trimmed.is_empty() && !trimmed.starts_with('#') && !indented { break; }
+            end += 1;
+        }
+        Some((header, end))
+    }
+
+    fn child_indent(lines: &[String], header: usize, end: usize) -> String {
+        for line in &lines[header + 1..end] {
+            let t = strip_cr(line);
+            let trimmed = t.trim_start();
+            if trimmed.is_empty() || trimmed.starts_with('#') { continue; }
+            let lead = &t[..t.len() - trimmed.len()];
+            if !lead.is_empty() { return lead.to_string(); }
+        }
+        "  ".to_string()
+    }
+
+    fn is_event_key(line: &str, indent: &str, event: &str) -> bool {
+        let t = strip_cr(line);
+        let Some(rest) = t.strip_prefix(indent) else { return false };
+        if rest.starts_with(' ') || rest.starts_with('\t') { return false; }
+        let Some(after) = rest.strip_prefix(event) else { return false };
+        let Some(value) = after.strip_prefix(':') else { return false };
+        value.is_empty()
+            || value.starts_with(' ')
+            || value.starts_with('\t')
+            || value.starts_with('#')
+            || value.starts_with('[')
+    }
+
+    fn event_value(line: &str, indent: &str, event: &str) -> String {
+        let t = strip_cr(line);
+        t[indent.len() + event.len() + 1..].trim().to_string()
+    }
+
+    /// First line after a key that is not indented deeper than it.
+    fn list_end(lines: &[String], key: usize, indent: &str) -> usize {
+        let mut i = key + 1;
+        while i < lines.len() {
+            let t = strip_cr(&lines[i]);
+            if t.trim().is_empty() { i += 1; continue; }
+            let deeper = t.strip_prefix(indent)
+                .map(|rest| rest.starts_with(' ') || rest.starts_with('\t'))
+                .unwrap_or(false);
+            if !deeper { break; }
+            i += 1;
+        }
+        i
+    }
+
+    /// The command a list item runs, without YAML quoting or a trailing comment.
+    fn item_command(line: &str) -> Option<String> {
+        let t = strip_cr(line).trim_start().strip_prefix('-')?.trim_start();
+        let value = t.strip_prefix("command:")?.trim_start();
+        let unquoted = if let Some(rest) = value.strip_prefix('\'') {
+            rest.split('\'').next().unwrap_or("")
+        } else if let Some(rest) = value.strip_prefix('"') {
+            rest.split('"').next().unwrap_or("")
+        } else {
+            value.split('#').next().unwrap_or("").trim()
+        };
+        Some(unquoted.trim().to_string())
+    }
+
+    /// A list item that runs AgentPet's hook (a comment merely mentioning it is
+    /// not ours, and a foreign command is never overwritten).
+    fn ours_item(line: &str) -> bool {
+        item_command(line).map(|c| is_ours(&c)).unwrap_or(false)
+    }
+
+    fn yaml_string(command: &str) -> String {
+        if !command.contains('\'') && !command.contains('\n') {
+            format!("'{command}'")
+        } else {
+            let escaped = command.replace('\\', "\\\\").replace('"', "\\\"").replace('\n', "\\n");
+            format!("\"{escaped}\"")
+        }
+    }
+
+    pub fn is_installed(text: &str, _events: &[&str]) -> bool {
+        let lines: Vec<String> = text.split('\n').map(|s| s.to_string()).collect();
+        let Some((header, end)) = hooks_block(&lines) else { return false };
+        (header + 1..end).any(|i| ours_item(&lines[i]))
+    }
+
+    fn create_block(lines: &mut Vec<String>, eol: &str, had_trailing_nl: bool) {
+        if lines.last().map(|s| s.is_empty()).unwrap_or(false) {
+            lines.pop();
+        } else if eol == "\r" {
+            if let Some(last) = lines.last_mut() {
+                if !last.ends_with('\r') { last.push('\r'); }
+            }
+        }
+        if !lines.is_empty() { lines.push(eol.to_string()); }
+        lines.push(format!("hooks:{eol}"));
+        if had_trailing_nl { lines.push(String::new()); }
+    }
+
+    fn install_event(
+        lines: &mut Vec<String>,
+        event: &str,
+        command: &str,
+        eol: &str,
+        path: &str,
+    ) -> Result<(), String> {
+        let (header, end) = hooks_block(lines).ok_or_else(|| format!("{path}: no hooks block"))?;
+        let indent = child_indent(lines, header, end);
+        let item = format!("{indent}  - command: {}{eol}", yaml_string(command));
+        if let Some(key) = (header + 1..end).find(|&i| is_event_key(&lines[i], &indent, event)) {
+            let raw = event_value(&lines[key], &indent, event);
+            let value = raw.split('#').next().unwrap_or("").trim().to_string();
+            if value.is_empty() {
+                let stop = list_end(lines, key, &indent);
+                if let Some(i) = (key + 1..stop).find(|&i| ours_item(&lines[i])) {
+                    lines[i] = item;
+                } else {
+                    let at = (key + 1..stop)
+                        .rev()
+                        .find(|&i| !strip_cr(&lines[i]).trim().is_empty())
+                        .map(|i| i + 1)
+                        .unwrap_or(key + 1);
+                    lines.insert(at, item);
+                }
+                return Ok(());
+            }
+            if value == "[]" {
+                lines[key] = format!("{indent}{event}:{eol}");
+                lines.insert(key + 1, item);
+                return Ok(());
+            }
+            return Err(format!(
+                "{path} already sets hooks.{event} inline; remove that inline value and retry."
+            ));
+        }
+        let mut at = end;
+        while at > header + 1 && strip_cr(&lines[at - 1]).trim().is_empty() { at -= 1; }
+        lines.insert(at, format!("{indent}{event}:{eol}"));
+        lines.insert(at + 1, item);
+        Ok(())
+    }
+
+    pub fn install(text: &str, command: &str, events: &[&str], path: &str) -> Result<String, String> {
+        if text.lines().any(|l| inline_value(l).is_some()) {
+            return Err(format!(
+                "{path} has an inline `hooks:` value; AgentPet does not rewrite it."
+            ));
+        }
+        let crlf = text.contains("\r\n");
+        let eol = if crlf { "\r" } else { "" };
+        let had_trailing_nl = text.ends_with('\n');
+        let mut lines: Vec<String> = text.split('\n').map(|s| s.to_string()).collect();
+        if hooks_block(&lines).is_none() {
+            create_block(&mut lines, eol, had_trailing_nl);
+        }
+        for event in events {
+            install_event(&mut lines, event, command, eol, path)?;
+        }
+        Ok(join_preserving_final_newline(lines, had_trailing_nl))
+    }
+
+    fn uninstall_event(lines: &mut Vec<String>, event: &str) -> bool {
+        let Some((header, end)) = hooks_block(lines) else { return false };
+        let indent = child_indent(lines, header, end);
+        let Some(key) = (header + 1..end).find(|&i| is_event_key(&lines[i], &indent, event)) else {
+            return false;
+        };
+        let raw = event_value(&lines[key], &indent, event);
+        let value = raw.split('#').next().unwrap_or("").trim().to_string();
+        if !value.is_empty() && value != "[]" { return false; }
+        let stop = list_end(lines, key, &indent);
+        let mut removed = false;
+        let mut i = stop;
+        while i > key + 1 {
+            i -= 1;
+            if ours_item(&lines[i]) {
+                lines.remove(i);
+                removed = true;
+            }
+        }
+        if !removed { return false; }
+        // Drop the event key when nothing is listed under it any more.
+        let Some((header, end)) = hooks_block(lines) else { return removed };
+        let indent = child_indent(lines, header, end);
+        if let Some(key) = (header + 1..end).find(|&i| is_event_key(&lines[i], &indent, event)) {
+            let stop = list_end(lines, key, &indent);
+            let has_item = (key + 1..stop).any(|i| strip_cr(&lines[i]).trim_start().starts_with('-'));
+            if !has_item { lines.remove(key); }
+        }
+        removed
+    }
+
+    pub fn uninstall(text: &str, events: &[&str]) -> String {
+        let mut lines: Vec<String> = text.split('\n').map(|s| s.to_string()).collect();
+        if hooks_block(&lines).is_none() { return text.to_string(); }
+        let mut removed = false;
+        for event in events {
+            removed |= uninstall_event(&mut lines, event);
+        }
+        // An emptied block goes away entirely, along with the separator line we
+        // added before it, so removal restores the user's file.
+        if removed {
+            if let Some((header, end)) = hooks_block(&lines) {
+                let empty = lines[header + 1..end].iter().all(|l| {
+                    let t = strip_cr(l);
+                    let trimmed = t.trim();
+                    trimmed.is_empty() || trimmed.starts_with('#')
+                });
+                if empty {
+                    lines.remove(header);
+                    if header > 0 && strip_cr(&lines[header - 1]).trim().is_empty() {
+                        lines.remove(header - 1);
+                    }
+                }
+            }
+        }
+        lines.join("\n")
+    }
+
+    fn join_preserving_final_newline(mut lines: Vec<String>, had_trailing_nl: bool) -> String {
+        if !had_trailing_nl {
+            if let Some(last) = lines.last_mut() {
+                if last.ends_with('\r') { last.pop(); }
+            }
+        }
+        lines.join("\n")
+    }
+
+    fn install_to_disk(command: &str, path: &Path, events: &[&str]) -> std::io::Result<()> {
+        let existing = match std::fs::read_to_string(path) {
+            Ok(s) => s,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+            Err(e) => return Err(e),
+        };
+        let updated = install(&existing, command, events, &path.display().to_string())
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+        if updated != existing { write_atomic(path, &updated)?; }
+        Ok(())
+    }
+
+    pub fn install_all(paths: &[PathBuf], command: &str, events: &[&str]) -> std::io::Result<()> {
+        let mut first_err: Option<String> = None;
+        for path in paths {
+            match install_to_disk(command, path, events) {
+                Ok(()) => {
+                    if let Some(home) = path.parent() {
+                        if let Err(e) = approve(&allowlist_path(home), events, command) {
+                            first_err.get_or_insert(e);
+                        }
+                    }
+                }
+                Err(e) => { first_err.get_or_insert(e.to_string()); }
+            }
+        }
+        match first_err {
+            Some(e) => Err(std::io::Error::new(std::io::ErrorKind::Other, e)),
+            None => Ok(()),
+        }
+    }
+
+    pub fn uninstall_all(paths: &[PathBuf], _command: &str, events: &[&str]) -> std::io::Result<()> {
+        let mut first_err: Option<String> = None;
+        for path in paths {
+            let existing = match std::fs::read_to_string(path) {
+                Ok(s) => s,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(e) => { first_err.get_or_insert(e.to_string()); continue; }
+            };
+            let updated = uninstall(&existing, events);
+            if updated != existing {
+                if let Err(e) = write_atomic(path, &updated) {
+                    first_err.get_or_insert(e.to_string());
+                    continue;
+                }
+            }
+            if let Some(home) = path.parent() {
+                if let Err(e) = revoke(&allowlist_path(home)) {
+                    first_err.get_or_insert(e);
+                }
+            }
+        }
+        match first_err {
+            Some(e) => Err(std::io::Error::new(std::io::ErrorKind::Other, e)),
+            None => Ok(()),
+        }
+    }
+
+    // ----- consent allowlist ----------------------------------------------
+
+    pub fn allowlist_path(home: &Path) -> PathBuf { home.join(ALLOWLIST) }
+
+    fn read_allowlist(path: &Path) -> Result<Value, String> {
+        match std::fs::read_to_string(path) {
+            Ok(s) if s.trim().is_empty() => Ok(json!({ "approvals": [] })),
+            Ok(s) => serde_json::from_str(&s).map_err(|e| {
+                format!("{} is not valid JSON ({}); fix or remove it and retry", path.display(), e)
+            }),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(json!({ "approvals": [] })),
+            Err(e) => Err(e.to_string()),
+        }
+    }
+
+    fn with_approvals<F>(path: &Path, edit: F) -> Result<(), String>
+    where F: FnOnce(&mut Vec<Value>) -> Result<(), String> {
+        let mut data = read_allowlist(path)?;
+        let obj = data.as_object_mut()
+            .ok_or_else(|| format!("{} is not a JSON object; fix or remove it and retry", path.display()))?;
+        let approvals = obj.entry("approvals").or_insert_with(|| json!([]));
+        let arr = approvals.as_array_mut()
+            .ok_or_else(|| format!("{}: approvals is not an array", path.display()))?;
+        edit(arr)?;
+        let text = serde_json::to_string_pretty(&data).map_err(|e| e.to_string())?;
+        write_atomic(path, &text).map_err(|e| e.to_string())
+    }
+
+    fn approval_is_ours(entry: &Value) -> bool {
+        entry.get("command").and_then(|c| c.as_str()).map(is_ours).unwrap_or(false)
+    }
+
+    /// Record consent for every event. Hermes skips (and never prompts for) a
+    /// hook that is not allowlisted in a non-interactive run, so installing the
+    /// config alone would look like a broken pet.
+    pub fn approve(path: &Path, events: &[&str], command: &str) -> Result<(), String> {
+        let now = iso8601_now();
+        with_approvals(path, |arr| {
+            arr.retain(|e| !approval_is_ours(e));
+            for event in events {
+                arr.push(json!({
+                    "event": event,
+                    "command": command,
+                    "approved_at": now,
+                    // No script mtime: Hermes only checks drift when this is set,
+                    // and agentpet.exe is replaced by every update.
+                    "script_mtime_at_approval": Value::Null,
+                }));
+            }
+            Ok(())
+        })
+    }
+
+    pub fn revoke(path: &Path) -> Result<(), String> {
+        if !path.is_file() { return Ok(()); }
+        with_approvals(path, |arr| {
+            arr.retain(|e| !approval_is_ours(e));
+            Ok(())
+        })
+    }
+
+    /// ISO-8601 UTC, matching the timestamp Hermes records itself.
+    fn iso8601_now() -> String {
+        let secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0) as i64;
+        let (year, month, day) = civil_from_days(secs.div_euclid(86_400));
+        let rem = secs.rem_euclid(86_400);
+        format!(
+            "{year:04}-{month:02}-{day:02}T{:02}:{:02}:{:02}Z",
+            rem / 3600,
+            (rem % 3600) / 60,
+            rem % 60
+        )
+    }
+
+    /// Howard Hinnant's days-from-civil, inverted.
+    pub(super) fn civil_from_days(days: i64) -> (i64, u32, u32) {
+        let z = days + 719_468;
+        let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+        let doe = z - era * 146_097;
+        let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+        let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+        let mp = (5 * doy + 2) / 153;
+        let day = (doy - (153 * mp + 2) / 5 + 1) as u32;
+        let month = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
+        let year = yoe + era * 400 + if month <= 2 { 1 } else { 0 };
+        (year, month, day)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1239,5 +1726,201 @@ mod tests {
         assert!(err.contains("unsupported hooks representation"), "{err}");
         assert_eq!(jcode::uninstall(src, &["turn_end"]), src);
         assert!(!jcode::is_installed(src, &["turn_end"]));
+    }
+
+    // ----- Hermes Agent ---------------------------------------------------
+
+    const HERMES_CMD: &str = "\"C:\\Users\\me\\AppData\\Local\\Programs\\AgentPet\\agentpet.exe\" hook --agent hermes";
+    const HERMES_EVENTS: &[&str] = &[
+        "on_session_start", "pre_llm_call", "post_tool_call", "pre_approval_request",
+        "on_human_input_request", "post_llm_call", "on_session_end",
+    ];
+    const HERMES_SAMPLE: &str = "# Hermes Agent CLI Configuration\nmodel: \"anthropic/claude\"\n\n# Gateway\nmultiplex_profiles: true\n";
+
+    #[test]
+    fn hermes_spec_uses_observer_events_only() {
+        let s = spec("hermes").expect("hermes spec");
+        assert!(matches!(s.style, Style::HermesYaml));
+        assert!(!s.events.contains(&"pre_tool_call"), "pre_tool_call blocks tools");
+        assert_eq!(s.events, HERMES_EVENTS);
+        assert!(config_path("hermes").is_none(), "hermes has per-profile homes");
+    }
+
+    #[test]
+    fn hermes_in_catalog() {
+        let row = catalog().into_iter().find(|a| a.kind == "hermes").expect("hermes");
+        assert_eq!(row.display_name, "Hermes Agent");
+        assert!(row.note.unwrap_or_default().contains("hermes"));
+    }
+
+    #[test]
+    fn hermes_install_creates_hooks_block_and_removes_it_again() {
+        let out = hermes::install(HERMES_SAMPLE, HERMES_CMD, HERMES_EVENTS, "config.yaml").unwrap();
+        let lines: Vec<&str> = out.split('\n').collect();
+        let hooks = lines.iter().position(|l| *l == "hooks:").expect("hooks block");
+        assert!(hooks > 3, "appended after the user's keys");
+        for event in HERMES_EVENTS {
+            let key = format!("  {event}:");
+            let i = lines.iter().position(|l| *l == key.as_str()).expect(event);
+            assert_eq!(lines[i + 1], format!("    - command: '{HERMES_CMD}'"));
+        }
+        assert!(hermes::is_installed(&out, HERMES_EVENTS));
+        assert!(!hermes::is_installed(HERMES_SAMPLE, HERMES_EVENTS));
+        assert_eq!(hermes::uninstall(&out, HERMES_EVENTS), HERMES_SAMPLE);
+        assert!(!hermes::is_installed(&hermes::uninstall(&out, HERMES_EVENTS), HERMES_EVENTS));
+    }
+
+    #[test]
+    fn hermes_install_is_idempotent_and_updates_the_binary_path() {
+        let once = hermes::install(HERMES_SAMPLE, HERMES_CMD, HERMES_EVENTS, "config.yaml").unwrap();
+        let twice = hermes::install(&once, HERMES_CMD, HERMES_EVENTS, "config.yaml").unwrap();
+        assert_eq!(twice, once);
+        let moved = hermes::install(
+            &once,
+            "\"D:\\Program Files\\AgentPet\\agentpet.exe\" hook --agent hermes",
+            HERMES_EVENTS,
+            "config.yaml",
+        )
+        .unwrap();
+        assert_eq!(moved.split('\n').count(), once.split('\n').count());
+        assert!(moved.contains(r"D:\Program Files\AgentPet\agentpet.exe"));
+        assert!(!moved.contains(r"Users\me"));
+    }
+
+    #[test]
+    fn hermes_keeps_foreign_hooks_and_appends_to_a_shared_event() {
+        let src = "hooks:\n  post_tool_call:\n    - command: 'notify-send done'\n";
+        let out = hermes::install(src, HERMES_CMD, HERMES_EVENTS, "config.yaml").unwrap();
+        assert!(out.contains("    - command: 'notify-send done'"), "{out}");
+        assert!(out.contains(&format!("    - command: '{HERMES_CMD}'")));
+        // The foreign item survives removal, its key stays, our item goes.
+        let removed = hermes::uninstall(&out, HERMES_EVENTS);
+        assert_eq!(
+            removed,
+            "hooks:\n  post_tool_call:\n    - command: 'notify-send done'\n"
+        );
+    }
+
+    #[test]
+    fn hermes_expands_an_inline_empty_list() {
+        let src = "hooks:\n  post_tool_call: []\n";
+        let out = hermes::install(src, HERMES_CMD, &["post_tool_call"], "config.yaml").unwrap();
+        assert!(out.contains("  post_tool_call:\n    - command: "), "{out}");
+        // An emptied block is dropped, so the empty list it replaced is gone too.
+        assert_eq!(hermes::uninstall(&out, &["post_tool_call"]), "");
+    }
+
+    #[test]
+    fn hermes_inline_mapping_is_refused_not_overwritten() {
+        let src = "hooks: {post_tool_call: [{command: 'x'}]}\n";
+        let err = hermes::install(src, HERMES_CMD, HERMES_EVENTS, "config.yaml").unwrap_err();
+        assert!(err.contains("inline `hooks:` value"), "{err}");
+        assert_eq!(hermes::uninstall(src, HERMES_EVENTS), src);
+        let flow_event = "hooks:\n  post_tool_call: [{command: 'x'}]\n";
+        let err = hermes::install(flow_event, HERMES_CMD, HERMES_EVENTS, "config.yaml").unwrap_err();
+        assert!(err.contains("already sets hooks.post_tool_call inline"), "{err}");
+    }
+
+    #[test]
+    fn hermes_preserves_crlf_and_trailing_newline() {
+        let src = "model: x\r\n";
+        let out = hermes::install(src, HERMES_CMD, &["post_llm_call"], "config.yaml").unwrap();
+        assert!(out.contains("hooks:\r\n"), "{out:?}");
+        assert!(out.contains("  post_llm_call:\r\n"), "{out:?}");
+        assert!(out.ends_with("\r\n"), "{out:?}");
+        assert_eq!(hermes::uninstall(&out, &["post_llm_call"]), src);
+    }
+
+    #[test]
+    fn hermes_comment_mentioning_agentpet_is_not_our_item() {
+        let src = "hooks:\n  post_llm_call:\n    - command: 'notify'  # agentpet hook\n";
+        let out = hermes::install(src, HERMES_CMD, &["post_llm_call"], "config.yaml").unwrap();
+        assert_eq!(out.matches("- command: 'notify'").count(), 1);
+        let removed = hermes::uninstall(&out, &["post_llm_call"]);
+        assert_eq!(removed, src);
+    }
+
+    #[test]
+    fn hermes_allowlist_approve_and_revoke() {
+        let dir = std::env::temp_dir().join(format!(
+            "agentpet-hermes-allowlist-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = hermes::allowlist_path(&dir);
+        std::fs::write(&path, r#"{"approvals":[{"event":"other","command":"~/bin/notify-send"}]}"#).unwrap();
+        hermes::approve(&path, &["pre_llm_call", "post_llm_call"], HERMES_CMD).unwrap();
+        let data: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        let approvals = data.get("approvals").and_then(|a| a.as_array()).unwrap();
+        assert_eq!(approvals.len(), 3, "foreign approval kept");
+        assert!(approvals.iter().any(|e| e["command"] == "~/bin/notify-send"));
+        let ours = approvals.iter().find(|e| e["event"] == "pre_llm_call").unwrap();
+        assert_eq!(ours["command"], HERMES_CMD);
+        assert!(ours["approved_at"].as_str().unwrap().ends_with('Z'));
+        // Re-approving refreshes instead of duplicating.
+        hermes::approve(&path, &["pre_llm_call"], HERMES_CMD).unwrap();
+        let data: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(data["approvals"].as_array().unwrap().len(), 2);
+        hermes::revoke(&path).unwrap();
+        let data: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        let approvals = data["approvals"].as_array().unwrap();
+        assert_eq!(approvals.len(), 1);
+        assert_eq!(approvals[0]["command"], "~/bin/notify-send");
+        // Revoking when the file is gone is a no-op, not an error.
+        std::fs::remove_file(&path).unwrap();
+        hermes::revoke(&path).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn hermes_install_leaves_malformed_allowlist_alone() {
+        let dir = std::env::temp_dir().join(format!("agentpet-hermes-bad-allowlist-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = hermes::allowlist_path(&dir);
+        std::fs::write(&path, "{not json").unwrap();
+        assert!(hermes::approve(&path, &["pre_llm_call"], HERMES_CMD).is_err());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "{not json");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn hermes_config_paths_include_every_profile_with_a_config() {
+        let root = std::env::temp_dir().join(format!(
+            "agentpet-hermes-homes-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        std::fs::create_dir_all(root.join("profiles").join("forge")).unwrap();
+        std::fs::create_dir_all(root.join("profiles").join("empty")).unwrap();
+        std::fs::write(root.join("profiles").join("forge").join("config.yaml"), "model: x\n").unwrap();
+        let previous = std::env::var("HERMES_HOME").ok();
+        std::env::set_var("HERMES_HOME", &root);
+        let paths = hermes::config_paths();
+        match previous {
+            Some(v) => std::env::set_var("HERMES_HOME", v),
+            None => std::env::remove_var("HERMES_HOME"),
+        }
+        assert_eq!(
+            paths,
+            vec![
+                root.join("config.yaml"),
+                root.join("profiles").join("forge").join("config.yaml"),
+            ]
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn hermes_iso8601_matches_a_real_timestamp() {
+        // 2026-10-27 is 20753 days after the Unix epoch.
+        assert_eq!(hermes::civil_from_days(20_753), (2026, 10, 27));
+        assert_eq!(hermes::civil_from_days(0), (1970, 1, 1));
     }
 }
