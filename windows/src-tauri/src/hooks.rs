@@ -38,7 +38,7 @@ fn spec(kind: &str) -> Option<Spec> {
         "claude" => Spec { style: Style::ClaudeNested, rel_path: &[".claude", "settings.json"],
             events: &["SessionStart", "UserPromptSubmit", "PreToolUse", "Notification", "Stop", "SubagentStop", "SessionEnd"] },
         "codex" => Spec { style: Style::ClaudeNested, rel_path: &[".codex", "hooks.json"],
-            events: &["SessionStart", "UserPromptSubmit", "PreToolUse", "PermissionRequest", "Stop", "SubagentStart", "SubagentStop"] },
+            events: &["SessionStart", "UserPromptSubmit", "PreToolUse", "PermissionRequest", "Stop", "Interrupt", "SessionEnd", "SubagentStart", "SubagentStop"] },
         "gemini" => Spec { style: Style::ClaudeNested, rel_path: &[".gemini", "settings.json"],
             events: &["SessionStart", "BeforeAgent", "BeforeTool", "AfterTool", "Notification", "AfterAgent", "SessionEnd"] },
         "cursor" => Spec { style: Style::CursorFlat, rel_path: &[".cursor", "hooks.json"],
@@ -1281,6 +1281,20 @@ mod timeout_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn codex_registers_interrupt_and_session_end_next_to_stop() {
+        let s = spec("codex").expect("codex spec");
+        for event in ["Stop", "Interrupt", "SessionEnd", "SubagentStop"] {
+            assert!(s.events.contains(&event), "codex must register {event}");
+        }
+        let mut seen = std::collections::HashSet::new();
+        assert!(s.events.iter().all(|e| seen.insert(*e)), "no duplicate codex events");
+        for event in s.events {
+            let entry = make_entry(s.style, event, "\"/x/agentpet\" hook --agent codex");
+            assert!(entry_is_ours(s.style, event, &entry), "{event} entry must be recognised for uninstall");
+        }
+    }
 
     #[test]
     fn opencode_plugin_is_v2_shape() {
