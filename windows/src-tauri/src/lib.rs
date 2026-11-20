@@ -668,8 +668,8 @@ fn show_transient(app: &tauri::AppHandle, label: &str, url: &str, base_h: f64, e
                 .transparent(true)
                 // Without this Windows draws a 1px DWM border around the whole
                 // (mostly transparent) window: a white line floating above the card.
-                // Only the stats card needs it; the popover keeps its shadow.
-                .shadow(label != "stats")
+                // The popover needs it too: its shadow showed as a ~3px white frame.
+                .shadow(false)
                 .always_on_top(true)
                 .skip_taskbar(true)
                 .resizable(false)
