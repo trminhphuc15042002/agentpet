@@ -63,7 +63,8 @@ body.overlay, body.overlay * {
   display: flex;
   flex-direction: column;
   gap: 3px;
-  max-width: 420px;
+  max-width: calc(100vw - 8px);
+  box-sizing: border-box;
   padding: 7px 12px;
   border-radius: 12px;
   background: var(--bubble-bg, rgba(22, 24, 38, 0.92));
@@ -104,7 +105,8 @@ body.overlay, body.overlay * {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
-  max-width: 320px;
+  max-width: 100%;
+  min-width: 0;
 }
 .bubble .party-count { color: var(--bubble-fg, #fff); opacity: .72; font-size: .9em; }
 .bubble .single-line {
@@ -112,7 +114,8 @@ body.overlay, body.overlay * {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
-  max-width: 320px;
+  max-width: 100%;
+  min-width: 0;
 }
 .bubble .single-line.fade { opacity: 0; }
 /* Single visible row hugs as a capsule, like the macOS ChatBubble. */
