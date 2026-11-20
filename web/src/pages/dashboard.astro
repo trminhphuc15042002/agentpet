@@ -24,42 +24,45 @@ const user = await currentUser(Astro.cookies);
         </div>
       ) : (
         <div id="dash" class="mt-8">
-          <!-- filters -->
           <div class="flex flex-wrap items-center gap-3">
             <select id="f-project" class="rounded-xl border border-line bg-white px-3 py-2 text-sm text-ink outline-none focus:border-brand-300"><option value="">All projects</option></select>
             <select id="f-agent" class="rounded-xl border border-line bg-white px-3 py-2 text-sm text-ink outline-none focus:border-brand-300"><option value="">All agents</option></select>
-            <div class="ml-auto inline-flex rounded-full border border-line bg-white p-1">
-              <button data-range="day" class="range-btn rounded-full px-4 py-1.5 text-sm font-semibold text-white bg-brand-600">Daily</button>
-              <button data-range="month" class="range-btn rounded-full px-4 py-1.5 text-sm font-semibold text-muted">Monthly</button>
+            <div class="inline-flex rounded-full border border-line bg-white p-1" id="range-box">
+              <button data-days="7" class="range-btn rounded-full px-3 py-1.5 text-sm font-semibold text-muted">7d</button>
+              <button data-days="30" class="range-btn rounded-full px-3 py-1.5 text-sm font-semibold text-muted">30d</button>
+              <button data-days="90" class="range-btn rounded-full px-3 py-1.5 text-sm font-semibold text-muted">90d</button>
+              <button data-days="365" class="range-btn rounded-full px-3 py-1.5 text-sm font-semibold text-muted">1y</button>
+            </div>
+            <div class="ml-auto inline-flex gap-2">
+              <button id="view-btn" class="btn-ghost !px-4 !py-2 text-sm">Monthly view</button>
+              <button id="csv-btn" class="btn-ghost !px-4 !py-2 text-sm">Export CSV</button>
             </div>
           </div>
 
-          <!-- stat cards -->
-          <div class="mt-5 grid grid-cols-2 gap-3 sm:grid-cols-4">
-            <div class="card p-4"><div class="text-xs font-semibold uppercase tracking-wide text-faint">Total tokens</div><div id="s-tokens" class="mt-1 font-display text-2xl font-bold text-ink">—</div></div>
-            <div class="card p-4"><div class="text-xs font-semibold uppercase tracking-wide text-faint">Sessions</div><div id="s-sessions" class="mt-1 font-display text-2xl font-bold text-ink">—</div></div>
-            <div class="card p-4"><div class="text-xs font-semibold uppercase tracking-wide text-faint">Projects</div><div id="s-projects" class="mt-1 font-display text-2xl font-bold text-ink">—</div></div>
-            <div class="card p-4"><div class="text-xs font-semibold uppercase tracking-wide text-faint">Agents</div><div id="s-agents" class="mt-1 font-display text-2xl font-bold text-ink">—</div></div>
-          </div>
+          <div class="mt-5 grid grid-cols-2 gap-3 lg:grid-cols-4" id="stats"></div>
 
-          <!-- chart -->
           <div class="card mt-5 p-5">
-            <div class="flex items-baseline justify-between"><h2 class="font-display text-lg font-bold text-ink">Tokens over time</h2><span id="chart-hint" class="text-xs text-faint"></span></div>
-            <div id="chart" class="mt-4 flex h-48 items-end gap-1 overflow-x-auto"></div>
+            <div class="flex flex-wrap items-baseline justify-between gap-2">
+              <h2 class="font-display text-lg font-bold text-ink" id="chart-title">Tokens over time</h2>
+              <span id="chart-hint" class="text-xs text-faint"></span>
+            </div>
+            <div id="legend" class="mt-2 flex flex-wrap gap-3 text-xs text-muted"></div>
+            <div id="chart" class="relative mt-3"></div>
+            <div id="tip" class="pointer-events-none fixed z-50 hidden rounded-lg border border-line bg-white px-3 py-2 text-xs shadow-lg"></div>
           </div>
 
           <div class="mt-5 grid gap-5 lg:grid-cols-2">
             <div class="card p-5">
-              <h2 class="font-display text-lg font-bold text-ink">By project</h2>
+              <h2 class="font-display text-lg font-bold text-ink">By project <span class="text-xs font-normal text-faint">(selected period)</span></h2>
               <div id="by-project" class="mt-4 space-y-3"></div>
             </div>
             <div class="card p-5">
-              <h2 class="font-display text-lg font-bold text-ink">By agent</h2>
+              <h2 class="font-display text-lg font-bold text-ink">By agent <span class="text-xs font-normal text-faint">(all time)</span></h2>
               <div id="by-agent" class="mt-4 space-y-3"></div>
             </div>
           </div>
 
-          <div id="empty" class="hidden py-12 text-center text-muted">No usage logged yet. Update the desktop app to 1.11+ and run an agent, it logs tokens per project automatically.</div>
+          <div id="empty" class="hidden py-12 text-center text-muted">No usage logged yet. Update the desktop app and run an agent, it logs tokens per project automatically. Cost and cache stats appear for days logged after the update.</div>
         </div>
       )}
     </div>
@@ -73,80 +76,182 @@ const user = await currentUser(Astro.cookies);
         if (n >= 1e9) return (n / 1e9).toFixed(1).replace(/\.0$/, "") + "B";
         if (n >= 1e6) return (n / 1e6).toFixed(1).replace(/\.0$/, "") + "M";
         if (n >= 1e3) return (n / 1e3).toFixed(1).replace(/\.0$/, "") + "K";
-        return String(n);
+        return String(Math.round(n));
       };
+      const usd = (n: number) => "$" + (Number(n) || 0).toFixed((Number(n) || 0) >= 100 ? 0 : 2);
       const esc = (s: string) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]!));
       const $ = (id: string) => document.getElementById(id)!;
-      let range = "day";
+      const COLORS = ["#6366f1", "#10b981", "#f59e0b", "#ef4444", "#06b6d4", "#a855f7", "#84cc16", "#64748b"];
 
-      function bars(data: any[], key: string, labelKey: string) {
-        const box = $("chart");
-        if (!data.length) { box.innerHTML = `<div class="m-auto text-sm text-faint">No data for this filter.</div>`; return; }
-        const max = Math.max(1, ...data.map((d) => d[key]));
-        box.innerHTML = data.map((d) => {
-          const h = Math.max(2, Math.round((d[key] / max) * 100));
-          return `<div class="group relative flex min-w-[8px] flex-1 flex-col items-center justify-end" title="${esc(d[labelKey])}: ${fmt(d[key])} tokens">
-            <div class="w-full rounded-t bg-brand-400 transition group-hover:bg-brand-600" style="height:${h}%"></div>
-          </div>`;
-        }).join("");
-        $("chart-hint").textContent = `${data.length} ${range === "day" ? "days" : "months"} · peak ${fmt(max)}`;
+      // Filters live in the URL so a view can be shared / reloaded.
+      const qs = new URLSearchParams(location.search);
+      let days = [7, 30, 90, 365].includes(Number(qs.get("days"))) ? Number(qs.get("days")) : 30;
+      let view = qs.get("view") === "month" ? "month" : "day";
+      let last: any = null;
+      const psel = $("f-project") as HTMLSelectElement;
+      const asel = $("f-agent") as HTMLSelectElement;
+
+      function syncUrl() {
+        const q = new URLSearchParams();
+        if (psel.value) q.set("project", psel.value);
+        if (asel.value) q.set("agent", asel.value);
+        if (days !== 30) q.set("days", String(days));
+        if (view === "month") q.set("view", "month");
+        history.replaceState(null, "", location.pathname + (q.toString() ? "?" + q : ""));
+      }
+      function paintToggles() {
+        document.querySelectorAll<HTMLElement>(".range-btn").forEach((b) => {
+          const on = Number(b.dataset.days) === days;
+          b.classList.toggle("bg-brand-600", on); b.classList.toggle("text-white", on); b.classList.toggle("text-muted", !on);
+        });
+        $("view-btn").textContent = view === "day" ? "Monthly view" : "Daily view";
+        ($("range-box") as HTMLElement).style.opacity = view === "month" ? "0.4" : "1";
       }
 
-      function rows(box: string, items: any[], nameKey: string, valKey: string) {
+      const dayStr = (d: Date) => d.toISOString().slice(0, 10);
+      const sum = (rows: any[], k: string) => rows.reduce((a, r) => a + (Number(r[k]) || 0), 0);
+
+      function stats(d: any) {
+        const today = new Date();
+        const cut = dayStr(new Date(today.getTime() - days * 864e5));
+        const cutPrev = dayStr(new Date(today.getTime() - 2 * days * 864e5));
+        const cur = d.daily.filter((r: any) => r.day >= cut);
+        const prev = d.daily.filter((r: any) => r.day >= cutPrev && r.day < cut);
+        const delta = (a: number, b: number) => b > 0 ? `${a >= b ? "▲" : "▼"} ${Math.abs(Math.round(((a - b) / b) * 100))}% vs prev ${days}d` : "no previous data";
+        const tok = sum(cur, "tokens"), tokP = sum(prev, "tokens");
+        const cost = sum(cur, "cost"), costP = sum(prev, "cost");
+        const ses = sum(cur, "sessions");
+        const cr = sum(cur, "cacheRead"), inp = sum(cur, "input"), cw = sum(cur, "cacheWrite");
+        const denom = cr + inp + cw;
+        const hit = denom > 0 ? Math.round((cr / denom) * 100) + "%" : "n/a";
+        // Month-end forecast: this month so far / elapsed days * days in month.
+        const now = new Date();
+        const dim = new Date(now.getFullYear(), now.getMonth() + 1, 0).getDate();
+        // From the server, not d.daily: daily only covers 2x the range, which misses early-month days on 7d.
+        const mCost = Number(d.monthToDate?.cost) || 0, mTok = Number(d.monthToDate?.tokens) || 0;
+        const fc = now.getDate() > 0 ? { c: (mCost / now.getDate()) * dim, t: (mTok / now.getDate()) * dim } : { c: 0, t: 0 };
+        const top = (d.topProjects || [])[0];
+        const cards: [string, string, string][] = [
+          ["Tokens", fmt(tok), delta(tok, tokP)],
+          ["Est. cost", cost > 0 ? usd(cost) : "n/a", cost > 0 ? delta(cost, costP) : "Claude only, after app update"],
+          ["Sessions", fmt(ses), ses > 0 ? `${fmt(tok / ses)} tokens / session` : ""],
+          ["Cache hit", hit, denom > 0 ? `${fmt(cr)} read of ${fmt(denom)} input-side` : "Claude only, after app update"],
+          ["Month forecast", mCost > 0 ? usd(fc.c) : fmt(fc.t), mCost > 0 ? `${fmt(fc.t)} tokens · ${usd(mCost)} so far` : "tokens, extrapolated"],
+          ["Top project", top ? esc(top.name) : "n/a", top ? `${fmt(top.tokens)}${top.cost > 0 ? " · " + usd(top.cost) : ""}` : ""],
+          ["Projects", String((d.projects || []).length), ""],
+          ["Agents", String((d.agents || []).length), ""],
+        ];
+        $("stats").innerHTML = cards.map(([l, v, s]) => `<div class="card p-4"><div class="text-xs font-semibold uppercase tracking-wide text-faint">${l}</div><div class="mt-1 truncate font-display text-2xl font-bold text-ink">${v}</div>${s ? `<div class="mt-0.5 text-[11px] text-faint">${s}</div>` : ""}</div>`).join("");
+      }
+
+      // Stacked SVG bar chart: one bar per day (or month), segments per agent.
+      function chart(d: any) {
+        const box = $("chart");
+        let buckets: { label: string; by: Record<string, number>; total: number; cost: number }[] = [];
+        if (view === "day") {
+          const cut = dayStr(new Date(Date.now() - days * 864e5));
+          const map = new Map<string, any>();
+          for (const r of d.daily) {
+            if (r.day < cut) continue;
+            const b = map.get(r.day) || { label: r.day, by: {}, total: 0, cost: 0 };
+            b.by[r.agent] = (b.by[r.agent] || 0) + r.tokens; b.total += r.tokens; b.cost += r.cost || 0;
+            map.set(r.day, b);
+          }
+          // Fill gaps so quiet days show as empty instead of being skipped.
+          for (let i = days - 1; i >= 0; i--) { const k = dayStr(new Date(Date.now() - i * 864e5)); if (!map.has(k)) map.set(k, { label: k, by: {}, total: 0, cost: 0 }); }
+          buckets = [...map.values()].sort((a, b) => a.label.localeCompare(b.label));
+        } else {
+          buckets = (d.monthly || []).map((m: any) => ({ label: m.month, by: { all: m.tokens }, total: m.tokens, cost: m.cost || 0 }));
+        }
+        if (!buckets.some((b) => b.total > 0)) { box.innerHTML = `<div class="py-16 text-center text-sm text-faint">No data for this filter.</div>`; $("legend").innerHTML = ""; $("chart-hint").textContent = ""; return; }
+        const agents = view === "day" ? [...new Set(buckets.flatMap((b) => Object.keys(b.by)))].sort() : ["all"];
+        const color = (a: string) => a === "all" ? COLORS[0] : COLORS[agents.indexOf(a) % COLORS.length];
+        const max = Math.max(1, ...buckets.map((b) => b.total));
+        const W = 800, H = 220, L = 44, B = 22, T = 8, iw = W - L, ih = H - B - T;
+        const bw = iw / buckets.length, gap = Math.min(3, bw * 0.2);
+        let svg = `<svg viewBox="0 0 ${W} ${H}" class="h-56 w-full" preserveAspectRatio="none">`;
+        for (let i = 0; i <= 4; i++) {
+          const y = T + ih - (ih * i) / 4;
+          svg += `<line x1="${L}" x2="${W}" y1="${y}" y2="${y}" stroke="#e5e7eb" stroke-width="1" vector-effect="non-scaling-stroke"/><text x="${L - 6}" y="${y + 3}" text-anchor="end" font-size="10" fill="#9ca3af">${fmt((max * i) / 4)}</text>`;
+        }
+        const every = Math.ceil(buckets.length / 8);
+        buckets.forEach((b, i) => {
+          let y = T + ih; const x = L + i * bw + gap / 2;
+          for (const a of agents) {
+            const v = b.by[a] || 0; if (!v) continue;
+            const h = (v / max) * ih; y -= h;
+            svg += `<rect x="${x}" y="${y}" width="${Math.max(1, bw - gap)}" height="${h}" fill="${color(a)}"/>`;
+          }
+          svg += `<rect data-i="${i}" x="${L + i * bw}" y="${T}" width="${bw}" height="${ih}" fill="transparent" class="hit"/>`;
+          if (i % every === 0) svg += `<text x="${x + (bw - gap) / 2}" y="${H - 6}" text-anchor="middle" font-size="10" fill="#9ca3af">${b.label.slice(view === "day" ? 5 : 0)}</text>`;
+        });
+        box.innerHTML = svg + "</svg>";
+        $("legend").innerHTML = view === "day" ? agents.map((a) => `<span class="inline-flex items-center gap-1"><i style="background:${color(a)}" class="inline-block h-2.5 w-2.5 rounded-sm"></i>${esc(a)}</span>`).join("") : "";
+        $("chart-hint").textContent = `${buckets.length} ${view === "day" ? "days" : "months"} · peak ${fmt(max)}`;
+        const tip = $("tip");
+        box.querySelectorAll<SVGRectElement>(".hit").forEach((r) => {
+          r.addEventListener("mousemove", (e: any) => {
+            const b = buckets[Number(r.dataset.i)];
+            tip.innerHTML = `<b>${esc(b.label)}</b><br>${fmt(b.total)} tokens${b.cost > 0 ? " · " + usd(b.cost) : ""}` +
+              (view === "day" ? Object.entries(b.by).map(([a, v]) => `<br><i style="background:${color(a)}" class="mr-1 inline-block h-2 w-2 rounded-sm"></i>${esc(a)} ${fmt(v as number)}`).join("") : "");
+            tip.classList.remove("hidden"); tip.style.left = Math.min(e.clientX + 12, innerWidth - 180) + "px"; tip.style.top = e.clientY + 12 + "px";
+          });
+          r.addEventListener("mouseleave", () => tip.classList.add("hidden"));
+        });
+      }
+
+      function rows(box: string, items: any[], nameKey: string) {
         const el = $(box);
-        const max = Math.max(1, ...items.map((i) => i[valKey]));
-        el.innerHTML = items.length ? items.map((i) => `
+        const max = Math.max(1, ...items.map((i) => i.tokens));
+        el.innerHTML = items.length ? items.slice(0, 12).map((i) => `
           <div>
             <div class="flex items-baseline justify-between gap-2 text-sm">
               <span class="truncate font-semibold text-ink">${esc(i[nameKey])}</span>
-              <span class="shrink-0 text-muted">${fmt(i[valKey])}</span>
+              <span class="shrink-0 text-muted">${fmt(i.tokens)}${i.cost > 0 ? " · " + usd(i.cost) : ""}</span>
             </div>
-            <div class="mt-1 h-2 rounded-full bg-mist"><div class="h-2 rounded-full bg-brand-500" style="width:${Math.round((i[valKey] / max) * 100)}%"></div></div>
+            <div class="mt-1 h-2 rounded-full bg-mist"><div class="h-2 rounded-full bg-brand-500" style="width:${Math.round((i.tokens / max) * 100)}%"></div></div>
           </div>`).join("") : `<div class="text-sm text-faint">Nothing yet.</div>`;
       }
 
       async function load() {
-        const project = ($("f-project") as HTMLSelectElement).value;
-        const agent = ($("f-agent") as HTMLSelectElement).value;
-        const q = new URLSearchParams();
-        if (project) q.set("project", project);
-        if (agent) q.set("agent", agent);
-        const d: any = await fetch("/api/usage/dashboard.json?" + q.toString()).then((r) => r.json()).catch(() => null);
+        syncUrl(); paintToggles();
+        const now = new Date();
+        const month = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}`;
+        const q = new URLSearchParams({ days: String(days), month });
+        if (psel.value) q.set("project", psel.value);
+        if (asel.value) q.set("agent", asel.value);
+        const d: any = await fetch("/api/usage/dashboard.json?" + q).then((r) => r.json()).catch(() => null);
         if (!d) return;
-
-        const hasAny = (d.projects || []).length > 0;
-        $("empty").classList.toggle("hidden", hasAny);
-
-        $("s-tokens").textContent = fmt(d.totalTokens);
-        $("s-sessions").textContent = fmt(d.totalSessions);
-        $("s-projects").textContent = String((d.projects || []).length);
-        $("s-agents").textContent = String((d.agents || []).length);
-
-        // Fill dropdowns once (preserve current selection).
-        const psel = $("f-project") as HTMLSelectElement;
+        last = d;
+        $("empty").classList.toggle("hidden", (d.projects || []).length > 0);
         if (psel.dataset.filled !== "1") {
           psel.insertAdjacentHTML("beforeend", (d.projects || []).map((p: any) => `<option value="${esc(p.id)}">${esc(p.name)}</option>`).join(""));
-          const asel = $("f-agent") as HTMLSelectElement;
           asel.insertAdjacentHTML("beforeend", (d.agents || []).map((a: any) => `<option value="${esc(a.agent)}">${esc(a.agent)}</option>`).join(""));
           psel.dataset.filled = "1";
+          if (qs.get("project")) psel.value = qs.get("project")!;
+          if (qs.get("agent")) asel.value = qs.get("agent")!;
+          if (psel.value || asel.value) return load();
         }
-
-        bars(range === "day" ? d.daily : d.monthly, "tokens", range === "day" ? "day" : "month");
-        rows("by-project", d.projects || [], "name", "tokens");
-        rows("by-agent", (d.agents || []).map((a: any) => ({ name: a.agent, tokens: a.tokens })), "name", "tokens");
+        $("chart-title").textContent = view === "day" ? `Tokens per day, by agent` : "Tokens per month";
+        stats(d); chart(d);
+        rows("by-project", d.topProjects || [], "name");
+        rows("by-agent", (d.agents || []).map((a: any) => ({ name: a.agent, tokens: a.tokens, cost: a.cost })), "name");
       }
 
-      $("f-project").addEventListener("change", load);
-      $("f-agent").addEventListener("change", load);
-      document.querySelectorAll<HTMLElement>(".range-btn").forEach((b) => b.addEventListener("click", () => {
-        range = b.dataset.range!;
-        document.querySelectorAll<HTMLElement>(".range-btn").forEach((x) => {
-          const on = x.dataset.range === range;
-          x.classList.toggle("bg-brand-600", on); x.classList.toggle("text-white", on);
-          x.classList.toggle("text-muted", !on);
-        });
-        load();
-      }));
+      function csv() {
+        if (!last) return;
+        const head = ["day", "agent", "tokens", "sessions", "cost_usd", "input", "output", "cache_read", "cache_write"];
+        const lines = [head.join(","), ...last.daily.map((r: any) => [r.day, r.agent, r.tokens, r.sessions, (r.cost || 0).toFixed(4), r.input || 0, r.output || 0, r.cacheRead || 0, r.cacheWrite || 0].join(","))];
+        const a = document.createElement("a");
+        a.href = URL.createObjectURL(new Blob([lines.join("\n")], { type: "text/csv" }));
+        a.download = `agentpet-usage-${dayStr(new Date())}.csv`; a.click(); URL.revokeObjectURL(a.href);
+      }
+
+      psel.addEventListener("change", load);
+      asel.addEventListener("change", load);
+      $("csv-btn").addEventListener("click", csv);
+      $("view-btn").addEventListener("click", () => { view = view === "day" ? "month" : "day"; load(); });
+      document.querySelectorAll<HTMLElement>(".range-btn").forEach((b) => b.addEventListener("click", () => { days = Number(b.dataset.days); load(); }));
       load();
     })();
   </script>

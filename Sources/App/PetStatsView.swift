@@ -45,6 +45,7 @@ struct PetStatsView: View {
             statGrid(state)
             trendBlock(state)
             costBlock
+            AgentUsageRows(limit: 3)
             usageBlock
             if let last = state.lastFedAt {
                 HStack {
@@ -136,7 +137,7 @@ struct PetStatsView: View {
             }
             Spacer()
             VStack(alignment: .trailing, spacing: 3) {
-                Text(hungerText)
+                Text(CareFormat.hunger(hunger))
                     .font(.system(size: 11, weight: .medium)).foregroundStyle(.white.opacity(0.7))
                 ProgressView(value: fullness)
                     .tint(fullness > 0.5 ? .green : (fullness > 0.25 ? .orange : .red))
@@ -153,14 +154,14 @@ struct PetStatsView: View {
         return VStack(alignment: .leading, spacing: 4) {
             ProgressView(value: levelProgress).tint(stageColor).controlSize(.small)
             HStack {
-                Text(verbatim: "\(Self.plain(inLevel)) / \(Self.plain(span)) XP")
+                Text(verbatim: "\(CareFormat.plain(inLevel)) / \(CareFormat.plain(span)) XP")
                     .font(.system(size: 10)).foregroundStyle(.white.opacity(0.45))
                 Spacer()
                 Text(verbatim: "\(Int((levelProgress * 100).rounded()))%")
                     .font(.system(size: 10, weight: .semibold)).foregroundStyle(stageColor)
             }
             Text(String(format: NSLocalizedString("≈ %@ tokens to Lv %d", comment: ""),
-                        Self.tokenString(PetCare.tokensToNextLevel(state: state)), level + 1))
+                        CareFormat.tokens(PetCare.tokensToNextLevel(state: state)), level + 1))
                 .font(.system(size: 10, weight: .medium)).foregroundStyle(stageColor.opacity(0.9))
         }
     }
@@ -234,11 +235,11 @@ struct PetStatsView: View {
 
     private func statGrid(_ state: PetCareState) -> some View {
         let cells: [(String, String, String)] = [
-            (NSLocalizedString("Today", comment: ""), Self.tokenString(state.tokensToday),
+            (NSLocalizedString("Today", comment: ""), CareFormat.tokens(state.tokensToday),
              mealText(state.mealsToday)),
             (NSLocalizedString("Streak", comment: ""), streakValue(state),
              NSLocalizedString("days fed", comment: "")),
-            (NSLocalizedString("Lifetime", comment: ""), Self.tokenString(state.totalTokens),
+            (NSLocalizedString("Lifetime", comment: ""), CareFormat.tokens(state.totalTokens),
              NSLocalizedString("tokens eaten", comment: "")),
             (NSLocalizedString("Sessions", comment: ""), "\(state.totalMeals)",
              NSLocalizedString("completed", comment: "")),
@@ -272,7 +273,7 @@ struct PetStatsView: View {
                     .font(.system(size: 9, weight: .semibold)).tracking(0.8)
                     .foregroundStyle(.white.opacity(0.35))
                 Spacer()
-                Text(verbatim: Self.tokenString(series.map(\.tokens).reduce(0, +)))
+                Text(verbatim: CareFormat.tokens(series.map(\.tokens).reduce(0, +)))
                     .font(.system(size: 9, weight: .semibold)).foregroundStyle(.white.opacity(0.55))
             }
             HStack(alignment: .bottom, spacing: 5) {
@@ -312,54 +313,28 @@ struct PetStatsView: View {
     // MARK: - Usage / limits
 
     @ObservedObject private var probe = NativeUsageProbe.shared
+    @ObservedObject private var visibility = UsageVisibility.shared
+    @State private var limitsExpanded = false
+    /// Providers shown before "Show more": each has one bar per window, so the
+    /// card gets tall quickly on a small screen.
+    private static let collapsedProviders = 2
 
     @ViewBuilder private var usageBlock: some View {
-        let providers = NativeUsageProbe.combined()
+        let providers = visibility.visible(NativeUsageProbe.combined())
         if !providers.isEmpty {
-            VStack(alignment: .leading, spacing: 7) {
+            VStack(alignment: .leading, spacing: 8) {
                 Text("Limits")
                     .font(.system(size: 9, weight: .semibold)).tracking(0.8)
                     .foregroundStyle(.white.opacity(0.35))
-                ForEach(providers) { p in
-                    let used = 1 - (p.fractionLeft ?? 0)      // bar fills as you spend
-                    // Match the level bar's stage colour; only flip to a warning
-                    // tint when a budget is nearly spent.
-                    let color: Color = used > 0.9 ? .red : (used > 0.75 ? .orange : stageColor)
-                    VStack(alignment: .leading, spacing: 3) {
-                        HStack(spacing: 6) {
-                            Text(verbatim: p.displayName)
-                                .font(.system(size: 11, weight: .semibold)).foregroundStyle(.white.opacity(0.9))
-                            if let w = p.windowLabel {
-                                Text(verbatim: w).font(.system(size: 9)).foregroundStyle(.white.opacity(0.4))
-                            }
-                            Spacer()
-                            Text(String(format: NSLocalizedString("%d%% used", comment: ""), Int((used * 100).rounded())))
-                                .font(.system(size: 10, weight: .semibold)).foregroundStyle(color)
-                            if let reset = Self.resetText(p.resetsAt) {
-                                Text(verbatim: "· \(reset)").font(.system(size: 9)).foregroundStyle(.white.opacity(0.4))
-                            }
-                        }
-                        GeometryReader { geo in
-                            ZStack(alignment: .leading) {
-                                Capsule().fill(.white.opacity(0.1))
-                                Capsule().fill(color).frame(width: max(2, geo.size.width * used))
-                            }
-                        }
-                        .frame(height: 5)
-                    }
+                let shown = limitsExpanded ? providers : Array(providers.prefix(Self.collapsedProviders))
+                ForEach(shown) { p in
+                    LimitWindowsView(provider: p, tint: stageColor)
+                }
+                if providers.count > Self.collapsedProviders {
+                    ShowMoreButton(expanded: $limitsExpanded, hidden: providers.count - shown.count)
                 }
             }
         }
-    }
-
-    /// "resets in 3h" / "in 12m" from a reset timestamp.
-    static func resetText(_ date: Date?) -> String? {
-        guard let date else { return nil }
-        let secs = date.timeIntervalSinceNow
-        guard secs > 0 else { return nil }
-        if secs >= 86400 { return String(format: NSLocalizedString("resets in %dd", comment: ""), Int(secs / 86400)) }
-        if secs >= 3600 { return String(format: NSLocalizedString("resets in %dh", comment: ""), Int(secs / 3600)) }
-        return String(format: NSLocalizedString("resets in %dm", comment: ""), max(1, Int(secs / 60)))
     }
 
     // MARK: - Derived
@@ -379,29 +354,5 @@ struct PetStatsView: View {
 
     private func streakValue(_ s: PetCareState) -> String {
         "\(s.streakDays)"
-    }
-
-    private var hungerText: String {
-        switch hunger {
-        case .full: return NSLocalizedString("Full", comment: "hunger")
-        case .satisfied: return NSLocalizedString("Satisfied", comment: "hunger")
-        case .peckish: return NSLocalizedString("Peckish", comment: "hunger")
-        case .hungry: return NSLocalizedString("Hungry", comment: "hunger")
-        case .starving: return NSLocalizedString("Starving", comment: "hunger")
-        }
-    }
-
-    private static func tokenString(_ n: Int) -> String {
-        switch n {
-        case 1_000_000...: return String(format: "%.1fM", Double(n) / 1_000_000)
-        case 1_000...: return String(format: "%.0fk", Double(n) / 1_000)
-        default: return "\(n)"
-        }
-    }
-
-    private static func plain(_ n: Int) -> String {
-        let f = NumberFormatter()
-        f.numberStyle = .decimal
-        return f.string(from: NSNumber(value: n)) ?? "\(n)"
     }
 }

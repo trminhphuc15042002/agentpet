@@ -1,6 +1,9 @@
+pub mod antigravity_usage;
 pub mod cli;
 pub mod geometry;
 pub mod hooks;
+pub mod jcode;
+pub mod jcode_usage;
 pub mod limits;
 pub mod server;
 pub mod statemap;
@@ -16,9 +19,8 @@ pub mod transcript;
 #[cfg_attr(target_env = "msvc", link(name = "resource.lib", kind = "static", modifiers = "-bundle,+verbatim"))]
 extern "C" {}
 
-use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::{Mutex, OnceLock};
+use std::sync::Mutex;
 use std::time::Duration;
 use tauri::menu::{Menu, MenuItem};
 use tauri::tray::TrayIconBuilder;
@@ -27,6 +29,7 @@ use tauri::{Emitter, Manager, PhysicalPosition, WebviewUrl, WebviewWindowBuilder
 /// Tray menu items kept around so the language switcher can re-label them live.
 struct TrayItems {
     show_pet: tauri::menu::CheckMenuItem<tauri::Wry>,
+    sessions: MenuItem<tauri::Wry>,
     settings: MenuItem<tauri::Wry>,
     updates: MenuItem<tauri::Wry>,
     quit: MenuItem<tauri::Wry>,
@@ -36,33 +39,13 @@ struct TrayItems {
 /// The pet's opaque region in physical pixels, relative to the window's top-left.
 /// The frontend reports this (canvas + visible bubble) so the background thread
 /// can make the transparent rest of the window click-through.
-#[derive(Default, Clone, Copy)]
+#[derive(Default)]
 #[cfg_attr(not(windows), allow(dead_code))]
 struct HitRect {
     x: f64,
     y: f64,
     w: f64,
     h: f64,
-}
-
-#[derive(Default)]
-struct PetWinState {
-    hit: HitRect,
-    last_w: f64,
-    last_h: f64,
-    pet_width: f64,
-    /// In-window pet shift, logical CSS px (returned to the webview).
-    pet_offset: f64,
-    /// Physical bottom-center of the pet; stable across resizes.
-    anchor: Option<(f64, f64)>,
-    last_origin: Option<(i32, i32)>,
-    last_saved: Option<(i32, i32)>,
-}
-
-type PetWinMap = Mutex<HashMap<String, PetWinState>>;
-
-fn is_pet_label(label: &str) -> bool {
-    label == "pet" || label.starts_with("pet-")
 }
 
 fn qa_profile_root() -> Option<PathBuf> {
@@ -85,62 +68,6 @@ pub(crate) fn app_config_dir() -> Option<PathBuf> {
         return Some(root.join("AgentPet"));
     }
     dirs::config_dir().map(|d| d.join("AgentPet"))
-}
-
-fn webview_browser_args() -> Option<String> {
-    #[cfg(not(debug_assertions))]
-    {
-        return None;
-    }
-    #[cfg(debug_assertions)]
-    {
-        let raw = std::env::var("AGENTPET_CDP_PORT").ok()?;
-        let port: u32 = raw.parse().ok()?;
-        if !(1..=65535).contains(&port) {
-            return None;
-        }
-        Some(format!(
-            "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection --remote-debugging-port={port} --remote-allow-origins=http://127.0.0.1:{port}"
-        ))
-    }
-}
-
-fn decorate_webview<R: tauri::Runtime, M: tauri::Manager<R>>(
-    mut builder: WebviewWindowBuilder<R, M>,
-) -> WebviewWindowBuilder<R, M> {
-    if let Some(args) = webview_browser_args() {
-        builder = builder.additional_browser_args(&args);
-    }
-    if let Some(root) = qa_profile_root() {
-        builder = builder.data_directory(root.join("WebView2"));
-    }
-    builder
-}
-
-fn primary_mouse_down() -> bool {
-    #[cfg(windows)]
-    {
-        #[link(name = "user32")]
-        extern "system" {
-            fn GetAsyncKeyState(v_key: i32) -> i16;
-        }
-        const VK_LBUTTON: i32 = 0x01;
-        unsafe { GetAsyncKeyState(VK_LBUTTON) as u16 & 0x8000 != 0 }
-    }
-    #[cfg(not(windows))]
-    {
-        false
-    }
-}
-
-fn split_wanted() -> &'static Mutex<Option<Vec<String>>> {
-    static W: OnceLock<Mutex<Option<Vec<String>>>> = OnceLock::new();
-    W.get_or_init(|| Mutex::new(None))
-}
-
-fn split_worker_running() -> &'static Mutex<bool> {
-    static R: OnceLock<Mutex<bool>> = OnceLock::new();
-    R.get_or_init(|| Mutex::new(false))
 }
 
 /// Append a line to %APPDATA%/AgentPet/debug.log , lightweight field
@@ -167,284 +94,84 @@ fn log_debug(msg: String) {
 }
 
 fn pos_file() -> Option<std::path::PathBuf> {
-    app_config_dir().map(|d| d.join("pos"))
+    dirs::config_dir().map(|d| d.join("AgentPet").join("pos"))
 }
 
-fn read_anchor(win: &tauri::WebviewWindow) -> Option<(f64, f64)> {
+fn read_pos() -> Option<(i32, i32)> {
     let s = std::fs::read_to_string(pos_file()?).ok()?;
-    let pos = geometry::parse_saved_pos(&s)?;
-    let mons = collect_monitors(win);
-    let fallback = win.scale_factor().unwrap_or(1.0);
-    Some(geometry::saved_anchor_on_monitors(pos, &mons, fallback))
+    let (a, b) = s.trim().split_once(',')?;
+    Some((a.trim().parse().ok()?, b.trim().parse().ok()?))
 }
 
-fn write_anchor(x: f64, y: f64) {
+fn write_pos(x: i32, y: i32) {
     if let Some(p) = pos_file() {
         if let Some(d) = p.parent() {
             let _ = std::fs::create_dir_all(d);
         }
-        let _ = std::fs::write(p, geometry::format_anchor(x, y));
+        let _ = std::fs::write(p, format!("{x},{y}"));
     }
 }
 
 /// Report the pet's opaque rectangle (physical px, window-relative) so empty
 /// transparent areas of the overlay let clicks pass through to apps below.
-/// Async commands keep the UI thread free: the geometry worker can hold this
-/// mutex while waiting for a native window operation on that thread.
 #[tauri::command]
-async fn set_hit_rect(window: tauri::WebviewWindow, app: tauri::AppHandle, x: f64, y: f64, w: f64, h: f64) {
-    let label = window.label().to_string();
-    if let Some(state) = app.try_state::<PetWinMap>() {
-        if let Ok(mut map) = state.lock() {
-            map.entry(label).or_default().hit = HitRect { x, y, w, h };
-        }
+fn set_hit_rect(app: tauri::AppHandle, window: tauri::WebviewWindow, x: f64, y: f64, w: f64, h: f64, sprite: Option<[f64; 4]>) {
+    // Also remembered per window label, so the stats card can anchor on the pet
+    // that opened it (split pets each have their own rect).
+    if let Ok(mut m) = hit_rects().lock() {
+        m.insert(window.label().to_string(), (x, y, w, h));
     }
-}
-
-#[derive(serde::Serialize)]
-struct ResizeReply {
-    #[serde(rename = "petOffset")]
-    pet_offset: f64,
-    #[serde(rename = "windowWidth")]
-    window_width: f64,
-}
-
-fn collect_monitors(win: &tauri::WebviewWindow) -> Vec<geometry::MonitorGeom> {
-    win.available_monitors()
-        .unwrap_or_default()
-        .into_iter()
-        .map(|m| {
-            let p = m.position();
-            let s = m.size();
-            let wa = m.work_area();
-            geometry::MonitorGeom {
-                frame: geometry::VisibleRect::from_pos_size(
-                    p.x as f64,
-                    p.y as f64,
-                    s.width as f64,
-                    s.height as f64,
-                ),
-                work: geometry::VisibleRect::from_pos_size(
-                    wa.position.x as f64,
-                    wa.position.y as f64,
-                    wa.size.width as f64,
-                    wa.size.height as f64,
-                ),
-                scale: m.scale_factor(),
-            }
-        })
-        .collect()
-}
-
-fn frame_physical(win: &tauri::WebviewWindow) -> Option<(f64, f64, f64, f64)> {
-    let pos = win.outer_position().ok()?;
-    let size = win.outer_size().ok()?;
-    Some((pos.x as f64, pos.y as f64, size.width as f64, size.height as f64))
-}
-
-fn refresh_drag_anchor(win: &tauri::WebviewWindow, st: &mut PetWinState) {
-    if let Some((x, y, w, h)) = frame_physical(win) {
-        let origin = (x as i32, y as i32);
-        // Don't recapture rounded programmatic coordinates on every resize:
-        // repeated half-pixel rounding would slowly move the pet at 150% DPI.
-        if st.anchor.is_none() || st.last_origin != Some(origin) {
-            let scale = win.scale_factor().unwrap_or(1.0);
-            st.anchor = Some(geometry::anchor_from_frame(x, y, w, h, st.pet_offset * scale));
-        }
-        st.last_origin = Some(origin);
-    }
-}
-
-fn pick_work_area(
-    win: &tauri::WebviewWindow,
-    anchor_x: f64,
-    anchor_y: f64,
-) -> Option<geometry::VisibleRect> {
-    let mons = collect_monitors(win);
-    let (cx, cy) = frame_physical(win)
-        .map(|(x, y, w, h)| (x + w / 2.0, y + h / 2.0))
-        .unwrap_or((anchor_x, anchor_y));
-    let idx = geometry::monitor_containing_pet(anchor_x, anchor_y, cx, cy, &mons)
-        .or_else(|| if mons.is_empty() { None } else { Some(0) })?;
-    Some(mons[idx].work)
-}
-
-fn apply_window_layout(
-    win: &tauri::WebviewWindow,
-    st: &mut PetWinState,
-    logical_w: f64,
-    logical_h: f64,
-    pet_width_logical: f64,
-) -> Result<ResizeReply, String> {
-    let scale = win.scale_factor().unwrap_or(1.0);
-    let phys_w = geometry::logical_to_physical(logical_w, scale).round();
-    let phys_h = geometry::logical_to_physical(logical_h, scale).round();
-    let pet_w = geometry::logical_to_physical(pet_width_logical.max(1.0), scale);
-    refresh_drag_anchor(win, st);
-    let (ax, ay) = st.anchor.unwrap_or((0.0, 0.0));
-    let visible = pick_work_area(win, ax, ay)
-        .unwrap_or(geometry::VisibleRect::from_pos_size(0.0, 0.0, phys_w, phys_h));
-    let layout = geometry::layout_window(ax, ay, phys_w, phys_h, pet_w, visible);
-    set_pet_frame(win, layout.origin_x.round() as i32, layout.origin_y.round() as i32,
-        phys_w as i32, phys_h as i32)?;
-    st.last_w = logical_w;
-    st.last_h = logical_h;
-    st.pet_width = pet_width_logical;
-    st.last_origin = Some((layout.origin_x.round() as i32, layout.origin_y.round() as i32));
-    st.pet_offset = geometry::physical_to_logical(layout.pet_offset + layout.origin_x - layout.origin_x.round(), scale);
-    st.anchor = Some(geometry::anchor_from_frame(
-        layout.origin_x,
-        layout.origin_y,
-        phys_w,
-        phys_h,
-        layout.pet_offset,
-    ));
-    Ok(ResizeReply {
-        pet_offset: st.pet_offset,
-        window_width: logical_w,
-    })
-}
-
-/// Position and size must reach Windows in one operation. Two Tauri setters
-/// expose a frame with the new origin and OLD width, briefly moving the pet by
-/// half the bubble's width change even when called together on the UI thread.
-fn set_pet_frame(win: &tauri::WebviewWindow, x: i32, y: i32, w: i32, h: i32) -> Result<(), String> {
-    #[cfg(windows)]
-    {
-        #[link(name = "user32")]
-        extern "system" {
-            fn SetWindowPos(hwnd: *mut std::ffi::c_void, after: *mut std::ffi::c_void,
-                x: i32, y: i32, w: i32, h: i32, flags: u32) -> i32;
-        }
-        let hwnd = win.hwnd().map_err(|e| e.to_string())?;
-        // SWP_NOZORDER | SWP_NOACTIVATE: never raise or focus the overlay.
-        if unsafe { SetWindowPos(hwnd.0 as _, std::ptr::null_mut(), x, y, w, h, 0x0014) } == 0 {
-            return Err(std::io::Error::last_os_error().to_string());
-        }
-        Ok(())
-    }
-    #[cfg(not(windows))]
-    {
-        win.set_position(PhysicalPosition::new(x, y)).map_err(|e| e.to_string())?;
-        win.set_size(tauri::PhysicalSize::new(w as u32, h as u32)).map_err(|e| e.to_string())
-    }
-}
-
-fn emit_pet_geometry(win: &tauri::WebviewWindow, st: &PetWinState) {
-    let _ = win.emit(
-        "pet-geometry",
-        serde_json::json!({
-            "petOffset": st.pet_offset,
-            "windowWidth": st.last_w,
-        }),
-    );
-}
-
-fn ensure_on_screen(win: &tauri::WebviewWindow, st: &mut PetWinState) {
-    let Some((ox, oy, w, h)) = frame_physical(win) else { return };
-    let scale = win.scale_factor().unwrap_or(1.0);
-    let pet_off = geometry::logical_to_physical(st.pet_offset, scale);
-    refresh_drag_anchor(win, st);
-    let (ax, ay) = st.anchor.unwrap_or_else(|| geometry::anchor_from_frame(ox, oy, w, h, pet_off));
-    if primary_mouse_down() {
+    // The global rect drives the MAIN pet's click-through loop and off-screen
+    // clamp, so split `pet-<projectId>` windows must not overwrite it.
+    if window.label() != "pet" {
         return;
     }
-    let mons = collect_monitors(win);
-    let (cx, cy) = (ox + w / 2.0, oy + h / 2.0);
-    let Some(idx) = geometry::monitor_containing_pet(ax, ay, cx, cy, &mons)
-        .or_else(|| if mons.is_empty() { None } else { Some(0) })
-    else {
-        return;
-    };
-    let work = mons[idx].work;
-    let oversized = w > (work.max_x - work.min_x) + 0.5 || h > (work.max_y - work.min_y) + 0.5;
-    if !geometry::frame_outside_work(ox, oy, w, h, work) && !oversized {
-        return;
+    if let Some(state) = app.try_state::<Mutex<HitRect>>() {
+        if let Ok(mut r) = state.lock() {
+            *r = HitRect { x, y, w, h };
+        }
     }
-    let pet_w = if st.pet_width > 0.0 {
-        geometry::logical_to_physical(st.pet_width, scale)
-    } else {
-        pet_off.abs() * 2.0 + 1.0
-    };
-    let layout = geometry::layout_from_live_frame(ox, oy, w, h, pet_off, pet_w.max(1.0), work);
-    if (layout.origin_x - ox).abs() < 0.5 && (layout.origin_y - oy).abs() < 0.5 {
-        st.pet_offset = geometry::physical_to_logical(layout.pet_offset, scale);
-        return;
+    if let Ok(mut r) = sprite_rect().lock() {
+        *r = sprite.map(|[sx, sy, sw, sh]| (sx, sy, sw, sh)).unwrap_or((x, y, w, h));
     }
-    let _ = win.set_position(PhysicalPosition::new(
-        layout.origin_x.round() as i32,
-        layout.origin_y.round() as i32,
-    ));
-    st.last_origin = Some((layout.origin_x.round() as i32, layout.origin_y.round() as i32));
-    st.pet_offset = geometry::physical_to_logical(layout.pet_offset, scale);
-    st.anchor = Some(geometry::anchor_from_frame(
-        layout.origin_x,
-        layout.origin_y,
-        w,
-        h,
-        layout.pet_offset,
-    ));
-    if st.last_w <= 0.0 {
-        st.last_w = geometry::physical_to_logical(w, scale);
-    }
-    emit_pet_geometry(win, st);
 }
 
-/// Calling-window resize: hug content, keep the pet's bottom-center on the
-/// monitor it already occupies, clamp to that display's work area / DPI.
+/// The main pet's sprite alone (physical px, window-relative), without the
+/// bubble. The off-screen clamp uses this: clamping the bubble too pushed a pet
+/// parked at the top edge down while a bubble showed, and it stayed there.
+fn sprite_rect() -> &'static Mutex<(f64, f64, f64, f64)> {
+    static S: std::sync::OnceLock<Mutex<(f64, f64, f64, f64)>> = std::sync::OnceLock::new();
+    S.get_or_init(|| Mutex::new((0.0, 0.0, 0.0, 0.0)))
+}
+
+/// Last reported hit rect (x, y, w, h in physical px, window-relative) by window label.
+fn hit_rects() -> &'static Mutex<std::collections::HashMap<String, (f64, f64, f64, f64)>> {
+    static M: std::sync::OnceLock<Mutex<std::collections::HashMap<String, (f64, f64, f64, f64)>>> =
+        std::sync::OnceLock::new();
+    M.get_or_init(|| Mutex::new(std::collections::HashMap::new()))
+}
+
+/// The separate clickable parts (bubble, sprite) in physical px, window-relative.
+/// Click-through uses these; the union in `HitRect` is only the visible bounds.
+fn hit_parts() -> &'static Mutex<Vec<(f64, f64, f64, f64)>> {
+    static P: std::sync::OnceLock<Mutex<Vec<(f64, f64, f64, f64)>>> = std::sync::OnceLock::new();
+    P.get_or_init(|| Mutex::new(Vec::new()))
+}
+
 #[tauri::command]
-async fn resize_pet_window(
-    window: tauri::WebviewWindow,
-    app: tauri::AppHandle,
-    width: f64,
-    height: f64,
-    pet_width: f64,
-) -> Result<ResizeReply, String> {
-    if !(width.is_finite() && height.is_finite() && width > 0.0 && height > 0.0) {
-        return Err("invalid size".into());
+fn set_hit_parts(window: tauri::WebviewWindow, parts: Vec<[f64; 4]>) {
+    // Only the main pet's click-through loop reads this: split `pet-<projectId>`
+    // windows run the same frontend and must not overwrite its region.
+    if window.label() != "pet" {
+        return;
     }
-    // Commit position, size and anchor together on the UI thread; otherwise a
-    // second resize can mistake a half-applied frame for a user drag.
-    let (tx, rx) = std::sync::mpsc::channel();
-    let target = window.clone();
-    window.run_on_main_thread(move || {
-        let result = resize_pet_window_impl(&target, &app, width, height, pet_width);
-        let _ = tx.send(result);
-    }).map_err(|e| e.to_string())?;
-    tauri::async_runtime::spawn_blocking(move || {
-        rx.recv_timeout(Duration::from_secs(5)).map_err(|e| e.to_string())?
-    }).await.map_err(|e| e.to_string())?
-}
-
-fn resize_pet_window_impl(
-    window: &tauri::WebviewWindow,
-    app: &tauri::AppHandle,
-    width: f64,
-    height: f64,
-    pet_width: f64,
-) -> Result<ResizeReply, String> {
-    let pet_w = if pet_width.is_finite() && pet_width > 0.0 { pet_width } else { 160.0 };
-    let label = window.label().to_string();
-    let Some(state) = app.try_state::<PetWinMap>() else {
-        return Err("no window state".into());
-    };
-    let mut map = state.lock().map_err(|e| e.to_string())?;
-    let st = map.entry(label).or_default();
-    let scale = window.scale_factor().unwrap_or(1.0);
-    let matches_viewport = window.inner_size().map(|size| {
-        !geometry::size_changed(width, height, size.width as f64 / scale, size.height as f64 / scale, 1.0)
-    }).unwrap_or(false);
-    if matches_viewport && st.last_w > 0.0 && !geometry::size_changed(width, height, st.last_w, st.last_h, 1.0) {
-        return Ok(ResizeReply {
-            pet_offset: st.pet_offset,
-            window_width: st.last_w,
-        });
+    if let Ok(mut p) = hit_parts().lock() {
+        *p = parts.into_iter().map(|[x, y, w, h]| (x, y, w, h)).collect();
     }
-    apply_window_layout(window, st, width, height, pet_w)
 }
 
 fn lang_file() -> Option<std::path::PathBuf> {
-    app_config_dir().map(|d| d.join("lang"))
+    dirs::config_dir().map(|d| d.join("AgentPet").join("lang"))
 }
 
 fn read_lang() -> String {
@@ -465,28 +192,88 @@ fn write_lang(code: &str) {
 }
 
 /// Localised tray labels (the only app text on the Rust side).
-fn tray_labels(code: &str) -> (&'static str, &'static str, &'static str, &'static str) {
+fn tray_labels(code: &str) -> (&'static str, &'static str, &'static str, &'static str, &'static str) {
     match code {
-        "vi" => ("Hiện pet", "Cài đặt", "Kiểm tra cập nhật", "Thoát AgentPet"),
-        "zh" => ("显示宠物", "设置", "检查更新", "退出 AgentPet"),
-        "zh-TW" => ("顯示寵物", "設定", "檢查更新", "結束 AgentPet"),
-        _ => ("Show pet", "Settings", "Check for updates", "Quit AgentPet"),
+        "vi" => ("Hiện pet", "Phiên làm việc", "Cài đặt", "Kiểm tra cập nhật", "Thoát AgentPet"),
+        "zh" => ("显示宠物", "会话", "设置", "检查更新", "退出 AgentPet"),
+        "zh-TW" => ("顯示寵物", "工作階段", "設定", "檢查更新", "結束 AgentPet"),
+        _ => ("Show pet", "Sessions", "Settings", "Check for updates", "Quit AgentPet"),
     }
 }
 
+// These touch config files, jcode's on a `\\wsl.localhost` share, and enabling
+// jcode may run `wsl.exe`. Sync commands run on the main thread and would freeze
+// the UI while WSL boots, so they go to the blocking pool.
 #[tauri::command]
-fn list_agents() -> Vec<hooks::AgentInfo> {
-    hooks::catalog()
+async fn list_agents() -> Vec<hooks::AgentInfo> {
+    tauri::async_runtime::spawn_blocking(hooks::catalog).await.unwrap_or_default()
 }
 
 #[tauri::command]
-fn is_installed(kind: String) -> bool {
-    hooks::is_installed(&kind)
+async fn is_installed(kind: String) -> bool {
+    tauri::async_runtime::spawn_blocking(move || hooks::is_installed(&kind)).await.unwrap_or(false)
 }
 
 #[tauri::command]
-fn toggle_install(kind: String) -> Result<bool, String> {
-    hooks::toggle(&kind)
+async fn toggle_install(kind: String) -> Result<bool, String> {
+    tauri::async_runtime::spawn_blocking(move || hooks::toggle(&kind))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+/// True while the left mouse button is held (a drag in progress), so the
+/// off-screen fix waits for the drop instead of fighting the drag.
+fn mouse_down() -> bool {
+    #[cfg(windows)]
+    {
+        #[link(name = "user32")]
+        extern "system" {
+            fn GetAsyncKeyState(vkey: i32) -> i16;
+        }
+        const VK_LBUTTON: i32 = 0x01;
+        // SAFETY: plain Win32 query with no pointers; high bit = currently down.
+        unsafe { (GetAsyncKeyState(VK_LBUTTON) as u16 & 0x8000) != 0 }
+    }
+    #[cfg(not(windows))]
+    {
+        // simplify: no global button query here; the 1 s save cadence
+        // (tick % 33) rarely lands mid-drag. Upgrade: track the drag in JS.
+        false
+    }
+}
+
+/// Drags the pet window by polling the cursor while the left button is held.
+/// `startDragging` (a native caption drag) makes Windows refuse to move a
+/// window's top edge above the screen top, so the pet's empty top margin
+/// (bubble room) kept it from reaching the top of the screen. Moving the
+/// window ourselves has no such limit; the drop-time clamp in the background
+/// loop still keeps the sprite itself on a screen.
+#[tauri::command]
+fn drag_pet(#[cfg_attr(not(windows), allow(unused_variables))] app: tauri::AppHandle, window: tauri::WebviewWindow) {
+    // The window that was pressed (main pet or a split `pet-<projectId>`), not a
+    // hard-coded "pet": otherwise pressing a project pet moved the main one.
+    let win = window;
+    #[cfg(windows)]
+    {
+        let (Ok(c0), Ok(w0)) = (app.cursor_position(), win.outer_position()) else {
+            let _ = win.start_dragging();
+            return;
+        };
+        std::thread::spawn(move || {
+            while mouse_down() {
+                if let Ok(c) = app.cursor_position() {
+                    let x = w0.x + (c.x - c0.x).round() as i32;
+                    let y = w0.y + (c.y - c0.y).round() as i32;
+                    let _ = win.set_position(PhysicalPosition::new(x, y));
+                }
+                std::thread::sleep(Duration::from_millis(8));
+            }
+        });
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = win.start_dragging();
+    }
 }
 
 /// Window creation MUST NOT run inside a sync command / menu callback on
@@ -502,18 +289,55 @@ fn open_settings_impl(app: tauri::AppHandle) {
             let _ = w.set_focus();
             return;
         }
-        match decorate_webview(
-            WebviewWindowBuilder::new(&app, "settings", WebviewUrl::App("settings.html".into()))
-                .title("AgentPet")
-                .inner_size(640.0, 620.0)
-                .resizable(false),
-        )
-        .build()
+        match WebviewWindowBuilder::new(&app, "settings", WebviewUrl::App("settings.html".into()))
+            .title("AgentPet")
+            .inner_size(640.0, 620.0)
+            .resizable(false)
+            .build()
         {
             Ok(_) => dlog("open_settings: window created"),
             Err(e) => dlog(&format!("open_settings: BUILD FAILED: {e}")),
         }
     });
+}
+
+/// Plays the default done/waiting sound natively (port of the macOS
+/// SoundSettings, which plays the system sounds Glass/Submarine via NSSound).
+/// The toast itself is sent with `<audio silent="true"/>` (winrt-notification's
+/// default when no sound is set), and the old WebAudio fallback was a 0.13 s
+/// beep at gain 0.05, so on Windows "done" was effectively silent. Playing the
+/// .wav by file name also works when the Windows sound scheme is "No Sounds".
+#[tauri::command]
+fn play_sound(event: String) {
+    #[cfg(windows)]
+    {
+        #[link(name = "winmm")]
+        extern "system" {
+            fn PlaySoundW(psz: *const u16, hmod: *mut std::ffi::c_void, flags: u32) -> i32;
+        }
+        const SND_ASYNC: u32 = 0x0001;
+        const SND_NODEFAULT: u32 = 0x0002;
+        const SND_FILENAME: u32 = 0x0002_0000;
+        let file = if event == "waiting" { "Windows Notify Messaging.wav" } else { "Windows Notify System Generic.wav" };
+        let windir = std::env::var("WINDIR").unwrap_or_else(|_| r"C:\Windows".into());
+        let path = format!(r"{}\Media\{}", windir, file);
+        let wide: Vec<u16> = path.encode_utf16().chain(std::iter::once(0)).collect();
+        // SAFETY: `wide` is a NUL-terminated UTF-16 path that outlives the call;
+        // SND_ASYNC makes winmm copy what it needs before returning.
+        unsafe { PlaySoundW(wide.as_ptr(), std::ptr::null_mut(), SND_ASYNC | SND_NODEFAULT | SND_FILENAME); }
+    }
+    #[cfg(not(windows))]
+    let _ = event; // Linux build keeps the WebAudio chime (see main.ts)
+}
+
+/// Subscription limits for the Care tab and the pet's "limit low" mood. Only
+/// percentages and reset times cross into the webview, never the token.
+#[tauri::command]
+async fn get_limits(only: Option<Vec<String>>) -> Vec<limits::LimitProvider> {
+    // default_paths() only reads a cache (no wsl.exe), so it is cheap; the file
+    // reads themselves run on the blocking pool inside the probes. `only` lists
+    // the providers the user left visible, so a hidden one is never contacted.
+    limits::probe_selected(only).await
 }
 
 #[tauri::command]
@@ -523,45 +347,6 @@ async fn open_settings(app: tauri::AppHandle) {
 }
 
 /// Open an external link in the default browser (About tab buttons).
-/// A row for the tray's "Sessions" submenu, built by the pet window.
-#[derive(serde::Deserialize)]
-struct TraySession {
-    session: String,
-    label: String,
-}
-
-/// Rebuild the tray's "Sessions" submenu from the live session list (the pet
-/// window pushes it every render). Picking an item opens that session in
-/// OpenChamber, same deep link as the `open_session` command.
-#[tauri::command]
-fn set_tray_sessions(app: tauri::AppHandle, sessions: Vec<TraySession>) {
-    use tauri::menu::{Menu, MenuItem, PredefinedMenuItem, Submenu};
-    let Some(items) = app.try_state::<Mutex<TrayItems>>() else { return };
-    let Ok(it) = items.lock() else { return };
-    let header = match read_lang().as_str() {
-        "vi" => "Phiên đang chạy",
-        "zh" => "会话",
-        "zh-TW" => "工作階段",
-        _ => "Sessions",
-    };
-    let Ok(sub) = Submenu::with_id(&app, "sessions", header, true) else { return };
-    if sessions.is_empty() {
-        if let Ok(none) = MenuItem::with_id(&app, "no_sessions", "—", false, None::<&str>) {
-            let _ = sub.append(&none);
-        }
-    }
-    for s in sessions.iter().take(12) {
-        if let Ok(mi) = MenuItem::with_id(&app, format!("session:{}", s.session), &s.label, true, None::<&str>) {
-            let _ = sub.append(&mi);
-        }
-    }
-    let Ok(sep) = PredefinedMenuItem::separator(&app) else { return };
-    let mut entries: Vec<&dyn tauri::menu::IsMenuItem<tauri::Wry>> =
-        vec![&it.show_pet, &it.settings, &it.updates, &sep, &sub, &it.quit];
-    let Ok(menu) = Menu::with_items(&app, &entries) else { return };
-    let _ = it.tray.set_menu(Some(menu));
-}
-
 #[tauri::command]
 fn open_url(url: String) {
     if !(url.starts_with("https://") || url.starts_with("http://")) {
@@ -644,6 +429,45 @@ fn open_session(session_id: String) {
     { let _ = std::process::Command::new("xdg-open").arg(&url).spawn(); }
 }
 
+/// A row for the tray's OpenChamber sessions submenu, built by the pet window.
+#[derive(serde::Deserialize)]
+struct TraySession {
+    session: String,
+    label: String,
+}
+
+/// Rebuild the tray menu with an OpenChamber sessions submenu from the live
+/// session list (the pet window pushes it every render). Picking an item opens
+/// that session in OpenChamber, same deep link as the `open_session` command.
+#[tauri::command]
+fn set_tray_sessions(app: tauri::AppHandle, sessions: Vec<TraySession>) {
+    use tauri::menu::{Menu, MenuItem, PredefinedMenuItem, Submenu};
+    let Some(items) = app.try_state::<Mutex<TrayItems>>() else { return };
+    let Ok(it) = items.lock() else { return };
+    let header = match read_lang().as_str() {
+        "vi" => "Phiên đang chạy",
+        "zh" => "会话",
+        "zh-TW" => "工作階段",
+        _ => "Sessions",
+    };
+    let Ok(sub) = Submenu::with_id(&app, "oc_sessions", header, true) else { return };
+    if sessions.is_empty() {
+        if let Ok(none) = MenuItem::with_id(&app, "no_sessions", "—", false, None::<&str>) {
+            let _ = sub.append(&none);
+        }
+    }
+    for s in sessions.iter().take(12) {
+        if let Ok(mi) = MenuItem::with_id(&app, format!("session:{}", s.session), &s.label, true, None::<&str>) {
+            let _ = sub.append(&mi);
+        }
+    }
+    let Ok(sep) = PredefinedMenuItem::separator(&app) else { return };
+    let entries: Vec<&dyn tauri::menu::IsMenuItem<tauri::Wry>> =
+        vec![&it.show_pet, &it.sessions, &it.settings, &it.updates, &sep, &sub, &it.quit];
+    let Ok(menu) = Menu::with_items(&app, &entries) else { return };
+    let _ = it.tray.set_menu(Some(menu));
+}
+
 /// Deliver the user's Allow/Deny decision for a gated tool call back to the
 /// parked hook request (see server::handle_approval).
 #[tauri::command]
@@ -656,7 +480,8 @@ fn resolve_approval(id: String, decision: String) {
 /// with a `?project=<id>` query so its script shows only that project. Closing
 /// happens for any `pet-*` window no longer in the list (merge back). With split
 /// off, the frontend calls this with an empty list, so all extras close.
-fn apply_split_windows(app: &tauri::AppHandle, projects: &[String]) {
+#[tauri::command]
+fn sync_project_windows(app: tauri::AppHandle, projects: Vec<String>) {
     use std::collections::HashSet;
     let want: HashSet<String> = projects.iter().map(|id| format!("pet-{id}")).collect();
     for (label, win) in app.webview_windows() {
@@ -670,52 +495,19 @@ fn apply_split_windows(app: &tauri::AppHandle, projects: &[String]) {
             continue;
         }
         let url = format!("index.html?project={id}");
-        match decorate_webview(
-            WebviewWindowBuilder::new(app, &label, WebviewUrl::App(url.into()))
-                .title("AgentPet")
-                .inner_size(260.0, 320.0)
-                .position(1200.0 - (i as f64 + 1.0) * 60.0, 600.0)
-                .transparent(true)
-                .decorations(false)
-                .always_on_top(true)
-                .skip_taskbar(true)
-                .resizable(false)
-                .shadow(false)
-                .focused(false),
-        )
-        .build()
-        {
-            Ok(_) => dlog(&format!("sync_project_windows: created {label}")),
-            Err(e) => dlog(&format!("sync_project_windows: BUILD FAILED {label}: {e}")),
-        }
+        let _ = WebviewWindowBuilder::new(&app, &label, WebviewUrl::App(url.into()))
+            .title("AgentPet")
+            .inner_size(260.0, 320.0)
+            .position(1200.0 - (i as f64 + 1.0) * 60.0, 600.0)
+            .transparent(true)
+            .decorations(false)
+            .always_on_top(true)
+            .skip_taskbar(true)
+            .resizable(false)
+            .shadow(false)
+            .focused(false)
+            .build();
     }
-}
-
-#[tauri::command]
-fn sync_project_windows(app: tauri::AppHandle, projects: Vec<String>) {
-    if let Ok(mut want) = split_wanted().lock() {
-        *want = Some(projects);
-    }
-    {
-        let mut running = match split_worker_running().lock() {
-            Ok(g) => g,
-            Err(_) => return,
-        };
-        if *running {
-            return;
-        }
-        *running = true;
-    }
-    std::thread::spawn(move || loop {
-        let batch = split_wanted().lock().ok().and_then(|mut g| g.take());
-        let Some(projects) = batch else {
-            if let Ok(mut running) = split_worker_running().lock() {
-                *running = false;
-            }
-            break;
-        };
-        apply_split_windows(&app, &projects);
-    });
 }
 
 /// Persist the chosen language (for the tray on next launch) and re-label the
@@ -723,10 +515,11 @@ fn sync_project_windows(app: tauri::AppHandle, projects: Vec<String>) {
 #[tauri::command]
 fn set_lang(app: tauri::AppHandle, code: String) {
     write_lang(&code);
-    let (p, s, u, q) = tray_labels(&code);
+    let (p, ss, s, u, q) = tray_labels(&code);
     if let Some(items) = app.try_state::<Mutex<TrayItems>>() {
         if let Ok(it) = items.lock() {
             let _ = it.show_pet.set_text(p);
+            let _ = it.sessions.set_text(ss);
             let _ = it.settings.set_text(s);
             let _ = it.updates.set_text(u);
             let _ = it.quit.set_text(q);
@@ -761,25 +554,131 @@ fn get_pet_visible(app: tauri::AppHandle) -> bool {
 
 /// Show the popover (the macOS menu-bar popover equivalent) near the cursor.
 fn show_popover(app: &tauri::AppHandle) {
-    let win = match app.get_webview_window("popover") {
+    show_transient(app, "popover", "popover.html", 430.0, "popover-shown", None);
+}
+
+/// Show the pet's stats card (the macOS right-click PetStatsView) near the
+/// cursor. `pet` is the slug of the pet that was right-clicked (split-pet
+/// windows each raise their own pet).
+fn show_stats(app: &tauri::AppHandle, pet: Option<String>) {
+    let url = match &pet {
+        Some(p) => format!("stats.html?pet={}", url_component(p)),
+        None => "stats.html".to_string(),
+    };
+    show_transient(app, "stats", &url, 600.0, "stats-shown", pet);
+}
+
+/// Percent-encodes everything but unreserved URL characters.
+fn url_component(s: &str) -> String {
+    s.bytes()
+        .map(|b| match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => (b as char).to_string(),
+            _ => format!("%{b:02X}"),
+        })
+        .collect()
+}
+
+/// Hangs the stats card off a pet window like the macOS popover (above the pet
+/// when it fits, else below, else beside it; see `geometry::place_card`) and
+/// tells the card where its arrow goes. Also re-run when the card resizes, so it
+/// never grows over the pet.
+/// Height (logical px) the card's content wants, reported by stats.ts.
+static STATS_WANT_H: Mutex<Option<f64>> = Mutex::new(None);
+/// Label of the pet window the card is anchored on (the one that was right-clicked).
+static STATS_ANCHOR: Mutex<String> = Mutex::new(String::new());
+
+fn place_stats(app: &tauri::AppHandle, win: &tauri::WebviewWindow, base_h: f64) {
+    let anchor = STATS_ANCHOR.lock().map(|g| g.clone()).unwrap_or_default();
+    let Some(pet) = app
+        .get_webview_window(&anchor)
+        .or_else(|| app.get_webview_window("pet"))
+    else { return };
+    let (Ok(pp), Ok(ps)) = (pet.outer_position(), pet.outer_size()) else { return };
+    let centre = (pp.x + ps.width as i32 / 2, pp.y + ps.height as i32 / 2);
+    // Scale of the monitor the card will be on (the pet's), not of the one the
+    // stats window sits on right now: on mixed-DPI setups the first placement
+    // would otherwise be sized for the wrong monitor.
+    let target_mon = app
+        .monitor_from_point(centre.0 as f64, centre.1 as f64)
+        .ok()
+        .flatten()
+        .or_else(|| pet.current_monitor().ok().flatten());
+    let win_sf = win.scale_factor().unwrap_or(1.0);
+    let sf = target_mon.as_ref().map(|m| m.scale_factor()).unwrap_or(win_sf);
+    let want_h = STATS_WANT_H.lock().ok().and_then(|g| *g).unwrap_or(base_h);
+    // Windows keeps an invisible resize border around undecorated windows
+    // (outer is 16 px wider than inner here); place by the outer rect.
+    let frame = match (win.outer_size(), win.inner_size()) {
+        (Ok(o), Ok(i)) => ((o.width as i32 - i.width as i32).max(0), (o.height as i32 - i.height as i32).max(0)),
+        _ => (0, 0),
+    };
+    // The frame was measured at the window's current scale: convert to the target's.
+    let k = if win_sf > 0.0 { sf / win_sf } else { 1.0 };
+    let frame = ((frame.0 as f64 * k).round() as i32, (frame.1 as f64 * k).round() as i32);
+    let size = ((316.0 * sf).round() as i32 + frame.0, (want_h * sf).round() as i32 + frame.1);
+    let pet_rect = (pp.x, pp.y, ps.width as i32, ps.height as i32);
+    // Anchor on what is drawn (sprite + bubble, from the click-through hit
+    // rect), not the whole 260x320 window, so the card hugs the pet.
+    let pet_rect = hit_rects()
+        .lock()
+        .ok()
+        .and_then(|m| m.get(pet.label()).copied())
+        .filter(|&(_, _, w, h)| w > 0.0 && h > 0.0)
+        .map(|(x, y, w, h)| (pp.x + x as i32, pp.y + y as i32, w as i32, h as i32))
+        .unwrap_or(pet_rect);
+    let area = target_mon
+        .map(|m| {
+            let wa = m.work_area();
+            (wa.position.x, wa.position.y, wa.size.width as i32, wa.size.height as i32)
+        });
+    let Some(area) = area else { return };
+    let p = geometry::place_card(size, pet_rect, area);
+    // Capped to the room on that side; the card body scrolls (stats.ts/CSS).
+    let inner_h = (size.1.min(p.max_h) - frame.1).max(1);
+    let _ = win.set_size(tauri::PhysicalSize::new((size.0 - frame.0) as u32, inner_h as u32));
+    let _ = win.set_position(PhysicalPosition::new(p.x, p.y));
+    let _ = win.emit(
+        "stats-anchor",
+        serde_json::json!({ "edge": p.edge.as_str(), "offset": p.arrow as f64 / sf }),
+    );
+}
+
+/// stats.ts reports how tall its content is; Rust sizes and places the card
+/// (one owner for both, so a resize can never push the card over the pet).
+#[tauri::command]
+fn stats_resized(app: tauri::AppHandle, height: f64) {
+    if let Ok(mut g) = STATS_WANT_H.lock() {
+        *g = Some(height.clamp(200.0, 1200.0));
+    }
+    if let Some(win) = app.get_webview_window("stats") {
+        place_stats(&app, &win, 600.0);
+    }
+}
+
+/// A frameless, always-on-top window that hides when it loses focus, placed
+/// near the cursor and clamped onto that monitor. Created on first use.
+fn show_transient(app: &tauri::AppHandle, label: &str, url: &str, base_h: f64, event: &str, payload: Option<String>) {
+    let win = match app.get_webview_window(label) {
         Some(w) => w,
         None => {
-            match decorate_webview(
-                WebviewWindowBuilder::new(app, "popover", WebviewUrl::App("popover.html".into()))
-                    .title("AgentPet")
-                    .inner_size(300.0, 430.0)
-                    .decorations(false)
-                    .transparent(true)
-                    .always_on_top(true)
-                    .skip_taskbar(true)
-                    .resizable(false)
-                    .focused(true)
-                    .visible(false),
-            )
-            .build()
+            match WebviewWindowBuilder::new(app, label, WebviewUrl::App(url.into()))
+                .title("AgentPet")
+                .inner_size(if label == "stats" { 316.0 } else { 300.0 }, base_h)
+                .decorations(false)
+                .transparent(true)
+                // Without this Windows draws a 1px DWM border around the whole
+                // (mostly transparent) window: a white line floating above the card.
+                // Only the stats card needs it; the popover keeps its shadow.
+                .shadow(label != "stats")
+                .always_on_top(true)
+                .skip_taskbar(true)
+                .resizable(false)
+                .focused(true)
+                .visible(false)
+                .build()
             {
                 Ok(w) => {
-                    dlog("popover: window created");
+                    dlog(&format!("{label}: window created"));
                     // Transient popover: losing focus hides it (Rust-side net,
                     // independent of the webview's own blur listener).
                     let wh = w.clone();
@@ -791,35 +690,46 @@ fn show_popover(app: &tauri::AppHandle) {
                     w
                 }
                 Err(e) => {
-                    dlog(&format!("popover: BUILD FAILED: {e}"));
+                    dlog(&format!("{label}: BUILD FAILED: {e}"));
                     return;
                 }
             }
         }
     };
-    // Place near the cursor, clamped onto the monitor under it.
-    if let Ok(cur) = app.cursor_position() {
+    if label == "stats" {
+        place_stats(app, &win, base_h);
+    } else if let Ok(cur) = app.cursor_position() {
+        // Quick popover (tray): near the cursor, clamped onto that monitor.
         let sf = win.scale_factor().unwrap_or(1.0);
-        let (w, h) = (300.0 * sf, 430.0 * sf);
+        let (w, h) = match win.outer_size() {
+            Ok(sz) if sz.height > 50 => (sz.width as f64, sz.height as f64),
+            _ => (300.0 * sf, base_h * sf),
+        };
         let mut x = cur.x - w / 2.0;
         let mut y = cur.y - h - 12.0; // prefer above the cursor (tray at bottom)
         if let Ok(Some(mon)) = app.monitor_from_point(cur.x, cur.y) {
             let mp = mon.position();
             let ms = mon.size();
-            // Keep the popover above the cursor and clamp to the monitor top.
-            // Dropping below the cursor used to land it on the pet, which is an
-            // always-on-top window and drew over the card.
+            if y < mp.y as f64 {
+                y = cur.y + 12.0; // no room above , drop below
+            }
             x = x.max(mp.x as f64).min(mp.x as f64 + ms.width as f64 - w);
             y = y.max(mp.y as f64).min(mp.y as f64 + ms.height as f64 - h);
         }
         let _ = win.set_position(PhysicalPosition::new(x, y));
     }
     let _ = win.show();
-    // Re-assert topmost on every show so the card sits above the always-on-top
-    // pet window (creation-time topmost is lost once the pet is re-shown).
-    let _ = win.set_always_on_top(true);
     let _ = win.set_focus();
-    let _ = win.emit("popover-shown", ());
+    let _ = win.emit(event, payload);
+}
+
+#[tauri::command]
+async fn open_stats(app: tauri::AppHandle, window: tauri::WebviewWindow, pet: Option<String>) {
+    // Anchor the card on the pet window that was right-clicked (main or split).
+    if let Ok(mut a) = STATS_ANCHOR.lock() {
+        *a = window.label().to_string();
+    }
+    std::thread::spawn(move || show_stats(&app, pet));
 }
 
 #[tauri::command]
@@ -838,7 +748,7 @@ fn set_pet_visible(app: tauri::AppHandle, visible: bool) {
             let _ = win.hide();
         }
     }
-    if let Some(p) = app_config_dir().map(|d| d.join("petvisible")) {
+    if let Some(p) = dirs::config_dir().map(|d| d.join("AgentPet").join("petvisible")) {
         let _ = std::fs::write(p, if visible { "1" } else { "0" });
     }
     if let Some(items) = app.try_state::<Mutex<TrayItems>>() {
@@ -865,7 +775,6 @@ pub fn run() {
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
         .invoke_handler(tauri::generate_handler![
-            limits::usage_limits,
             list_agents,
             is_installed,
             toggle_install,
@@ -881,78 +790,49 @@ pub fn run() {
             set_pet_visible,
             get_pet_visible,
             open_popover,
+            open_stats,
+            stats_resized,
+            drag_pet,
             log_debug,
             set_hit_rect,
-            resize_pet_window
+            play_sound,
+            get_limits,
+            set_hit_parts
         ])
         .setup(|app| {
+            // Feed the pet only what is spent from now on: transcripts are read
+            // from the start again on every launch, and a resumed session copies
+            // earlier replies into its new file.
+            transcript::count_usage_from_now();
             server::start(app.handle().clone());
-            app.manage(Mutex::new(HashMap::<String, PetWinState>::new()));
+            app.manage(Mutex::new(HitRect::default()));
 
-            dlog(&format!("cdp args={:?}", webview_browser_args()));
-            if app.get_webview_window("pet").is_none() {
-                let built = decorate_webview(
-                    WebviewWindowBuilder::new(app.handle(), "pet", WebviewUrl::App("index.html".into()))
-                        .title("AgentPet")
-                        .inner_size(260.0, 320.0)
-                        .position(1200.0, 600.0)
-                        .transparent(true)
-                        .decorations(false)
-                        .always_on_top(true)
-                        .skip_taskbar(true)
-                        .resizable(false)
-                        .shadow(false)
-                        .focused(false),
-                )
-                .build();
-                match built {
-                    Ok(_) => dlog("pet window created"),
-                    Err(e) => dlog(&format!("pet window BUILD FAILED: {e}")),
-                }
-            }
-
-            // Restore the pet's bottom-center anchor. First run (no saved
-            // position) parks it near the bottom-right of the primary work area.
+            // Restore where the user last dragged the pet. First run (no saved
+            // position) parks it near the bottom-right of the primary screen;
+            // the LogicalPosition keeps it on-screen on smaller/HiDPI displays.
             if let Some(win) = app.get_webview_window("pet") {
-                let on_screen = |x: f64, y: f64| {
+                // Only restore a saved position that still lands on a monitor
+                // (displays may have been unplugged/rearranged since last run).
+                let on_screen = |x: i32, y: i32| {
                     win.available_monitors().map_or(false, |mons| {
                         mons.iter().any(|m| {
                             let p = m.position();
                             let s = m.size();
-                            x >= p.x as f64
-                                && x < p.x as f64 + s.width as f64
-                                && y >= p.y as f64
-                                && y < p.y as f64 + s.height as f64
+                            x >= p.x
+                                && x < p.x + s.width as i32
+                                && y >= p.y
+                                && y < p.y + s.height as i32
                         })
                     })
                 };
-                if let Some((ax, ay)) = read_anchor(&win).filter(|&(x, y)| on_screen(x, y)) {
-                    if let Some(state) = app.try_state::<PetWinMap>() {
-                        if let Ok(mut map) = state.lock() {
-                            let st = map.entry("pet".into()).or_default();
-                            st.anchor = Some((ax, ay));
-                            st.last_origin = win.outer_position().ok().map(|p| (p.x, p.y));
-                            let _ = apply_window_layout(&win, st, 260.0, 320.0, 160.0);
-                        }
-                    }
+                if let Some((px, py)) = read_pos().filter(|&(x, y)| on_screen(x, y)) {
+                    let _ = win.set_position(PhysicalPosition::new(px, py));
                 } else if let Ok(Some(mon)) = win.primary_monitor() {
-                    let wa = mon.work_area();
                     let s = mon.scale_factor();
-                    let w = 260.0 * s;
-                    let h = 320.0 * s;
-                    let x = (wa.position.x as f64 + wa.size.width as f64 - w - 40.0 * s)
-                        .max(wa.position.x as f64);
-                    let y = (wa.position.y as f64 + wa.size.height as f64 - h - 70.0 * s)
-                        .max(wa.position.y as f64);
-                    let _ = win.set_position(PhysicalPosition::new(x.round() as i32, y.round() as i32));
-                    if let Some(state) = app.try_state::<PetWinMap>() {
-                        if let Ok(mut map) = state.lock() {
-                            let st = map.entry("pet".into()).or_default();
-                            st.anchor = Some(geometry::anchor_from_frame(x, y, w, h, 0.0));
-                            st.last_w = 260.0;
-                            st.last_h = 320.0;
-                        }
-                    }
+                    let sz = mon.size();
+                    let x = (sz.width as f64 / s) - 260.0 - 40.0;
+                    let y = (sz.height as f64 / s) - 320.0 - 70.0;
+                    let _ = win.set_position(tauri::LogicalPosition::new(x.max(0.0), y.max(0.0)));
                 }
             }
 
@@ -962,105 +842,101 @@ pub fn run() {
             // (2) persist the pet's position so it survives a restart.
             let handle = app.handle().clone();
             std::thread::spawn(move || {
-                let mut last_ignore: HashMap<String, bool> = HashMap::new();
-                let mut last_popover: Option<bool> = None;
+                let mut last_ignore: Option<bool> = None;
                 let mut flip_logs: u32 = 0;
+                let mut last_saved = read_pos();
                 let mut tick: u32 = 0;
                 loop {
                     std::thread::sleep(Duration::from_millis(30));
-                    let pets: Vec<(String, tauri::WebviewWindow)> = handle
-                        .webview_windows()
-                        .into_iter()
-                        .filter(|(label, _)| is_pet_label(label))
-                        .collect();
-                    if pets.is_empty() {
+                    let Some(win) = handle.get_webview_window("pet") else {
                         continue;
-                    }
-
-                    // While the popover is open, drop every pet's topmost flag so
-                    // the popover (also topmost) is drawn above it. Creation/
-                    // show-time topmost on the popover was not enough: the pet,
-                    // being topmost too, still covered the card. Restored as soon
-                    // as the popover hides.
-                    let popover_open = handle
-                        .get_webview_window("popover")
-                        .and_then(|p| p.is_visible().ok())
-                        .unwrap_or(false);
-                    if Some(popover_open) != last_popover {
-                        for (_, win) in &pets {
-                            let _ = win.set_always_on_top(!popover_open);
-                        }
-                        last_popover = Some(popover_open);
-                    }
+                    };
 
                     // Cross-platform (tao): cursor + window in physical px.
                     // Fail-safe: while the hit rect is unknown (webview still
                     // booting) or the cursor can't be read, keep the window
                     // INTERACTIVE , a clickable pet beats an untouchable one.
-                    let cursor = handle.cursor_position();
-                    for (label, win) in &pets {
-                        match (cursor.as_ref(), win.outer_position()) {
-                            (Ok(cur), Ok(wp)) => {
-                                let rect = handle.try_state::<PetWinMap>().and_then(|s| {
-                                    s.lock().ok().and_then(|m| {
-                                        m.get(label).map(|st| (st.hit.x, st.hit.y, st.hit.w, st.hit.h))
-                                    })
-                                });
-                                let inside = match rect {
-                                    Some((x, y, w, h)) if w > 0.0 => {
-                                        let rx = cur.x - wp.x as f64;
-                                        let ry = cur.y - wp.y as f64;
+                    match (handle.cursor_position(), win.outer_position()) {
+                        (Ok(cur), Ok(wp)) => {
+                            let rect = handle
+                                .try_state::<Mutex<HitRect>>()
+                                .and_then(|s| s.lock().ok().map(|r| (r.x, r.y, r.w, r.h)));
+                            let parts = hit_parts().lock().map(|p| p.clone()).unwrap_or_default();
+                            let inside = match rect {
+                                Some((x, y, w, h)) if w > 0.0 => {
+                                    let rx = cur.x - wp.x as f64;
+                                    let ry = cur.y - wp.y as f64;
+                                    if parts.is_empty() {
                                         rx >= x && rx <= x + w && ry >= y && ry <= y + h
-                                    }
-                                    _ => true, // no rect yet , stay interactive
-                                };
-                                // ignore_cursor_events = true -> clicks pass through.
-                                let ignore = !inside;
-                                if last_ignore.get(label).copied() != Some(ignore) {
-                                    let _ = win.set_ignore_cursor_events(ignore);
-                                    last_ignore.insert(label.clone(), ignore);
-                                    if flip_logs < 30 {
-                                        flip_logs += 1;
-                                        dlog(&format!(
-                                            "hit flip {label}: ignore={ignore} cur=({:.0},{:.0}) win=({},{}) rect={:?}",
-                                            cur.x, cur.y, wp.x, wp.y, rect
-                                        ));
+                                    } else {
+                                        // Any part counts; the empty space between a wide bubble and
+                                        // a narrow pet is click-through.
+                                        parts.iter().any(|&(px, py, pw, ph)| rx >= px && rx <= px + pw && ry >= py && ry <= py + ph)
                                     }
                                 }
+                                _ => true, // no rect yet , stay interactive
+                            };
+                            // ignore_cursor_events = true -> clicks pass through.
+                            let mut ignore = !inside;
+                            // Never switch to click-through mid-drag: the pet may
+                            // move under the cursor and the drag would be dropped.
+                            if ignore && last_ignore == Some(false) && mouse_down() {
+                                ignore = false;
                             }
-                            (Err(e), _) => {
-                                if last_ignore.get(label).copied() != Some(false) {
-                                    dlog(&format!("cursor_position error: {e} , forcing interactive"));
-                                    let _ = win.set_ignore_cursor_events(false);
-                                    last_ignore.insert(label.clone(), false);
+                            if Some(ignore) != last_ignore {
+                                let _ = win.set_ignore_cursor_events(ignore);
+                                last_ignore = Some(ignore);
+                                if flip_logs < 30 {
+                                    flip_logs += 1;
+                                    dlog(&format!(
+                                        "hit flip: ignore={ignore} cur=({:.0},{:.0}) win=({},{}) rect={:?}",
+                                        cur.x, cur.y, wp.x, wp.y, rect
+                                    ));
                                 }
                             }
-                            _ => {}
                         }
+                        (Err(e), _) => {
+                            if last_ignore != Some(false) {
+                                dlog(&format!("cursor_position error: {e} , forcing interactive"));
+                                let _ = win.set_ignore_cursor_events(false);
+                                last_ignore = Some(false);
+                            }
+                        }
+                        _ => {}
                     }
 
                     tick = tick.wrapping_add(1);
                     if tick % 33 == 0 {
-                        let maintenance = handle.clone();
-                        let _ = handle.run_on_main_thread(move || {
-                        if let Some(state) = maintenance.try_state::<PetWinMap>() {
-                            if let Ok(mut map) = state.lock() {
-                                for (label, win) in &pets {
-                                    let st = map.entry(label.clone()).or_default();
-                                    ensure_on_screen(win, st);
-                                }
-                                if let Some(st) = map.get_mut("pet") {
-                                    if let Some((ax, ay)) = st.anchor {
-                                        let key = (ax.round() as i32, ay.round() as i32);
-                                        if st.last_saved != Some(key) {
-                                            write_anchor(ax, ay);
-                                            st.last_saved = Some(key);
-                                        }
+                        if let Ok(mut p) = win.outer_position() {
+                            // A pet dropped past an edge (or outside every
+                            // monitor) comes back onto the nearest work area
+                            // before it is saved there (macOS fix, PR #67).
+                            // Only once the mouse is released, so an ongoing
+                            // drag is never fought.
+                            if !mouse_down() {
+                                if let (Ok(size), Ok(mons)) = (win.outer_size(), win.available_monitors()) {
+                                    let areas: Vec<geometry::Rect> = mons.iter().map(|m| {
+                                        let wa = m.work_area();
+                                        (wa.position.x, wa.position.y, wa.size.width as i32, wa.size.height as i32)
+                                    }).collect();
+                                    let visible = sprite_rect()
+                                        .lock()
+                                        .map(|r| *r)
+                                        .unwrap_or((0.0, 0.0, 0.0, 0.0));
+                                    let fixed = geometry::keep_visible_on_screen((p.x, p.y), (size.width as i32, size.height as i32), visible, &areas);
+                                    if fixed != (p.x, p.y) {
+                                        dlog(&format!("pet off screen at ({},{}) -> ({},{})", p.x, p.y, fixed.0, fixed.1));
+                                        let _ = win.set_position(PhysicalPosition::new(fixed.0, fixed.1));
+                                        p.x = fixed.0;
+                                        p.y = fixed.1;
                                     }
                                 }
                             }
+                            if last_saved != Some((p.x, p.y)) {
+                                write_pos(p.x, p.y);
+                                last_saved = Some((p.x, p.y));
+                            }
                         }
-                        });
                     }
                 }
             });
@@ -1068,32 +944,37 @@ pub fn run() {
             // Tray menu , the pet window is frameless, so this is how you reach
             // Settings or quit the app. Labels start in the saved language; the
             // Settings switcher re-labels them live via the `set_lang` command.
-            let (p_lbl, s_lbl, u_lbl, q_lbl) = tray_labels(&read_lang());
-            let pet_visible = app_config_dir()
-                .map(|d| d.join("petvisible"))
+            let (p_lbl, ss_lbl, s_lbl, u_lbl, q_lbl) = tray_labels(&read_lang());
+            let pet_visible = dirs::config_dir()
+                .map(|d| d.join("AgentPet").join("petvisible"))
                 .and_then(|p| std::fs::read_to_string(p).ok())
                 .map(|s| s.trim() != "0")
                 .unwrap_or(true);
             let show_pet_i = tauri::menu::CheckMenuItem::with_id(
                 app, "show_pet", p_lbl, true, pet_visible, None::<&str>)?;
+            // Linux appindicator never fires tray left-click, so the popover
+            // (agents list, Clear all, size) needs a menu entry to be reachable.
+            let sessions_i = MenuItem::with_id(app, "sessions", ss_lbl, true, None::<&str>)?;
             let settings_i = MenuItem::with_id(app, "settings", s_lbl, true, None::<&str>)?;
             let updates_i = MenuItem::with_id(app, "check_updates", u_lbl, true, None::<&str>)?;
             let quit_i = MenuItem::with_id(app, "quit", q_lbl, true, None::<&str>)?;
-            let menu = Menu::with_items(app, &[&show_pet_i, &settings_i, &updates_i, &quit_i])?;
+            let menu = Menu::with_items(app, &[&show_pet_i, &sessions_i, &settings_i, &updates_i, &quit_i])?;
             let mut tray = TrayIconBuilder::new()
                 .tooltip("AgentPet")
                 .menu(&menu)
                 .show_menu_on_left_click(false)
                 .on_tray_icon_event(|tray, event| {
-                    // Left-click on the tray icon opens Settings; the pet's
-                    // right-click popover covers the quick controls.
+                    // Left-click on the tray icon opens the quick popover (agents,
+                    // show pet, size); right-clicking the pet opens its stats card.
                     if let tauri::tray::TrayIconEvent::Click {
                         button: tauri::tray::MouseButton::Left,
                         button_state: tauri::tray::MouseButtonState::Up,
                         ..
                     } = event
                     {
-                        open_settings_impl(tray.app_handle().clone());
+                        // Window creation must not run on the event-loop callback.
+                        let app = tray.app_handle().clone();
+                        std::thread::spawn(move || show_popover(&app));
                     }
                 })
                 .on_menu_event(|app, event| match event.id.as_ref() {
@@ -1103,6 +984,11 @@ pub fn run() {
                             .and_then(|w| w.is_visible().ok())
                             .unwrap_or(true);
                         set_pet_visible(app.clone(), !now_visible);
+                    }
+                    "sessions" => {
+                        // Window creation must not run on the menu callback.
+                        let app = app.clone();
+                        std::thread::spawn(move || show_popover(&app));
                     }
                     "settings" => open_settings_impl(app.clone()),
                     id if id.starts_with("session:") => {
@@ -1127,6 +1013,7 @@ pub fn run() {
             let tray = tray.build(app)?;
             app.manage(Mutex::new(TrayItems {
                 show_pet: show_pet_i.clone(),
+                sessions: sessions_i.clone(),
                 settings: settings_i.clone(),
                 updates: updates_i.clone(),
                 quit: quit_i.clone(),
@@ -1141,19 +1028,17 @@ pub fn run() {
             dlog("setup complete, tray + loop running");
             // First run: open Settings with the welcome overlay so the user knows
             // to pick a pet and connect an agent (a port of the macOS onboarding).
-            let marker = app_config_dir().map(|d| d.join(".onboarded"));
+            let marker = dirs::config_dir().map(|d| d.join("AgentPet").join(".onboarded"));
             if let Some(m) = marker {
                 if !m.exists() {
                     let h = app.handle().clone();
                     std::thread::spawn(move || {
-                        let _ = decorate_webview(
-                            WebviewWindowBuilder::new(
-                                &h, "settings", WebviewUrl::App("settings.html?onboarding=1".into()))
-                                .title("AgentPet")
-                                .inner_size(640.0, 620.0)
-                                .resizable(false),
-                        )
-                        .build();
+                        let _ = WebviewWindowBuilder::new(
+                            &h, "settings", WebviewUrl::App("settings.html?onboarding=1".into()))
+                            .title("AgentPet")
+                            .inner_size(640.0, 620.0)
+                            .resizable(false)
+                            .build();
                     });
                     if let Some(parent) = m.parent() {
                         let _ = std::fs::create_dir_all(parent);

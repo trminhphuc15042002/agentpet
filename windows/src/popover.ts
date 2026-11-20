@@ -7,15 +7,16 @@ import { emit, listen } from "@tauri-apps/api/event";
 import { getCurrentWindow, LogicalSize } from "@tauri-apps/api/window";
 import { check } from "@tauri-apps/plugin-updater";
 import { relaunch, exit } from "@tauri-apps/plugin-process";
-import { SessionStore, basename, type AgentEventPayload, type Session, type SubagentEventPayload } from "./state";
+import { SessionStore, type AgentEventPayload, type Session, type SubagentEventPayload } from "./state";
 import { agentIconUrl } from "./icons";
+import { projectLabel } from "./projectnames";
 import { elapsedString } from "./bubble";
 import { t, setLang, type Lang } from "./i18n";
 import * as care from "./care";
 import * as sync from "./sync";
-import { cachedLimits, followLimits, requestLimits } from "./limits";
 import { savedSlug, petDisplayName, getLibrary } from "./catalog";
 import { focusActive, sessionKey } from "./companion";
+import * as limits from "./limits";
 
 const store = new SessionStore();
 const list = document.getElementById("pop-list")!;
@@ -57,43 +58,6 @@ function petName(slug: string): string {
   const custom = petDisplayName(slug);
   if (custom !== slug) return custom;
   return getLibrary().find((p) => p.slug === slug)?.name || slug;
-}
-
-function renderLimits() {
-  const row = document.getElementById("pop-limits");
-  if (!row) return;
-  const order = ["claude", "codex"];
-  const rank = (id: string) => { const i = order.indexOf(id); return i < 0 ? order.length : i; };
-  const ps = cachedLimits().filter((x) => x.windows.length > 0).sort((a, b) => rank(a.id) - rank(b.id));
-  if (!ps.length) { row.replaceChildren(); row.hidden = true; return; }
-  const name = (w: { label: string }) => t(w.label === "weekly" ? "Weekly" : "Session");
-  row.replaceChildren(...ps.map((p) => {
-    const ws = [...p.windows].sort((a, b) => b.usedPct - a.usedPct);
-    const tight = ws[0], other = ws[1];
-    const pct = Math.max(0, Math.min(100, Math.round(tight.usedPct)));
-    const main = `${p.name} · ${name(tight)} ${pct}%`;
-    let reset = "";
-    if (tight.resetsAtMs) {
-      const mins = Math.max(0, Math.round((tight.resetsAtMs - Date.now()) / 60000));
-      reset = `${t("resets in")} ${mins >= 1440 ? `${Math.floor(mins / 1440)}d ${Math.floor((mins % 1440) / 60)}h` : mins >= 60 ? `${Math.floor(mins / 60)}h` : `${mins}m`}`;
-    }
-    const el = (cls: string, text?: string) => { const e = document.createElement("div"); e.className = cls; if (text !== undefined) e.textContent = text; return e; };
-    const wrap = document.createElement("div");
-    const xp = el("care-xprow");
-    const m = document.createElement("span"); m.textContent = main;
-    const o = document.createElement("span"); o.className = "dim"; o.textContent = reset;
-    xp.append(m, o);
-    const sub = other ? el("care-xprow dim", `${name(other)} ${Math.round(other.usedPct)}%`) : null;
-    const bar = el("care-bar");
-    const fill = el("care-bar-fill");
-    fill.style.width = `${pct}%`;
-    fill.style.background = pct > 90 ? "var(--red)" : pct > 75 ? "var(--orange)" : "";
-    bar.append(fill);
-    wrap.append(xp, bar);
-    if (sub) wrap.append(sub);
-    return wrap;
-  }));
-  row.hidden = false;
 }
 
 function renderCare() {
@@ -163,6 +127,7 @@ function applyStatic() {
   syncCareMore();
   set("t-pop-needs", "NEEDS YOU");
   set("t-pop-agents", "AGENTS");
+  set("t-pop-limits", "LIMITS");
   set("pop-clear", "Clear all");
   set("pop-empty", "Nothing running right now.");
   set("t-pop-showpet", "Show pet");
@@ -205,7 +170,7 @@ function paint() {
     const stale = (s.state === "working" || s.state === "waiting") && Date.now() - s.updatedAt > 180_000;
     row.innerHTML =
       `<span class="sess-dot"></span>` +
-      `<span class="pop-ameta"><b>${esc(s.project ? basename(s.project) : s.session)}</b>` +
+      `<span class="pop-ameta"><b>${esc(s.project ? projectLabel(s.project) : s.session)}</b>` +
       `<span class="cap">${esc([s.role, s.model, s.cost > 0 ? `$${s.cost.toFixed(2)}` : "", s.title || s.live || t(cap(s.state)), stale ? `${elapsedString(s.updatedAt)} ${t("no update")}` : ""].filter(Boolean).join(" · "))}</span></span>` +
       (icon ? `<img class="dp-icon" src="${icon}" alt="">` : "") +
       `<span class="sess-time">${timeString(s)}</span>`;
@@ -243,6 +208,19 @@ function paint() {
     }
     list.appendChild(row);
   }
+  paintLimits();
+}
+
+/// Subscription limits from the pet window's cache (no extra API call), only
+/// the providers left visible in Settings > Care, like the mac stats card.
+function paintLimits() {
+  const wrap = document.getElementById("pop-limits")!;
+  const host = document.getElementById("pop-limits-list")!;
+  const shown = limits.visible(limits.cached());
+  wrap.style.display = shown.length ? "" : "none";
+  const html = shown.map((p) =>
+    `<div class="pop-limit"><div class="pop-limit-name">${esc(p.display_name)}</div>${limits.windowRowsHtml(p, true)}</div>`).join("");
+  if (host.innerHTML !== html) host.innerHTML = html;
 }
 
 function cap(s: string): string {
@@ -308,7 +286,7 @@ function renderNeeds() {
     const icon = agentIconUrl(s.agent);
     row.innerHTML =
       `<span class="pop-need-badge">${esc(needLabel(kind))}</span>` +
-      `<span class="pop-ameta"><b>${esc(s.project ? basename(s.project) : s.session)}</b>` +
+      `<span class="pop-ameta"><b>${esc(s.project ? projectLabel(s.project) : s.session)}</b>` +
       `<span class="cap">${esc([s.role, s.model, kind === "approval" ? s.pendingApproval?.tool : "", s.title || s.live].filter(Boolean).join(" · "))}</span></span>` +
       (icon ? `<img class="dp-icon" src="${icon}" alt="">` : "") +
       `<span class="sess-time">${timeString(s)}</span>`;
@@ -392,6 +370,10 @@ listen<{ id: string; session: string }>("agent-approval-resolved", (e) => {
   store.clearApproval(e.payload.session);
   paintAndFit();
 });
+listen<{ agent: string; session: string; title: string }>("agent-title", (e) => {
+  store.setTitle(e.payload.agent, e.payload.session, e.payload.title);
+  paintAndFit();
+});
 listen<Session>("session-snapshot", (e) => { store.seed(e.payload); paintAndFit(); });
 // Re-sync + refresh whenever the popover is shown again.
 listen("popover-shown", () => {
@@ -400,7 +382,6 @@ listen("popover-shown", () => {
   emit("sessions-request", null);
   // Refresh the level from the linked account so the HUD shows the cloud value.
   void sync.autoRestore().then(() => paintAndFit());
-  requestLimits();
   paintAndFit();
 });
 emit("sessions-request", null);
@@ -417,10 +398,9 @@ function fitWindow() {
 }
 
 const origPaint = paint;
-function paintAndFit() { origPaint(); renderCare(); renderLimits(); renderNeeds(); fitWindow(); }
+function paintAndFit() { origPaint(); renderCare(); renderNeeds(); fitWindow(); }
 
 listen("care-updated", () => paintAndFit());
-followLimits(() => paintAndFit());
 listen<Lang>("lang-changed", (e) => { setLang(e.payload); applyStatic(); paintAndFit(); });
 setInterval(paintAndFit, 1000); // live elapsed + prune
 applyStatic();

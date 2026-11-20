@@ -288,6 +288,8 @@ struct BubbleSettingsView: View {
             } header: {
                 Text("Visible agents")
             }
+
+            ProjectNamesSection()
         }
     }
 

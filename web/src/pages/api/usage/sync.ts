@@ -28,6 +28,7 @@ export const POST: APIRoute = async ({ request }) => {
 
   const now = Date.now();
   const int = (x: any) => Math.max(0, Math.min(Number.MAX_SAFE_INTEGER, Math.floor(Number(x) || 0)));
+  const num = (x: any) => { const n = Number(x); return Number.isFinite(n) && n > 0 ? Math.min(n, 1e9) : 0; };
   const str = (x: any, max: number) => String(x ?? "").slice(0, max);
   const isDay = (s: any) => typeof s === "string" && /^\d{4}-\d{2}-\d{2}$/.test(s);
 
@@ -35,12 +36,17 @@ export const POST: APIRoute = async ({ request }) => {
     .filter((r) => r && typeof r.projectId === "string" && r.projectId.length > 0 && isDay(r.day) && typeof r.agent === "string" && r.agent.length > 0)
     .map((r) =>
       db.prepare(
-        `INSERT INTO usage_daily (user_id, project_id, project_name, agent, day, tokens, sessions, updated_at)
-         VALUES (?,?,?,?,?,?,?,?)
+        `INSERT INTO usage_daily (user_id, project_id, project_name, agent, day, tokens, sessions, updated_at, cost_usd, input_tokens, output_tokens, cache_read, cache_write)
+         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
          ON CONFLICT (user_id, project_id, agent, day) DO UPDATE SET
            project_name=excluded.project_name,
            tokens=MAX(usage_daily.tokens, excluded.tokens),
            sessions=MAX(usage_daily.sessions, excluded.sessions),
+           cost_usd=MAX(usage_daily.cost_usd, excluded.cost_usd),
+           input_tokens=MAX(usage_daily.input_tokens, excluded.input_tokens),
+           output_tokens=MAX(usage_daily.output_tokens, excluded.output_tokens),
+           cache_read=MAX(usage_daily.cache_read, excluded.cache_read),
+           cache_write=MAX(usage_daily.cache_write, excluded.cache_write),
            updated_at=excluded.updated_at`
       ).bind(
         device.user_id,
@@ -50,10 +56,20 @@ export const POST: APIRoute = async ({ request }) => {
         r.day,
         int(r.tokens),
         int(r.sessions),
-        now
+        now,
+        num(r.costUSD),
+        int(r.inputTokens),
+        int(r.outputTokens),
+        int(r.cacheRead),
+        int(r.cacheWrite)
       )
     );
   if (statements.length) await db.batch(statements);
+  // Retention: the app keeps 120 days, the server keeps ~400 for year-over-year views.
+  try {
+    const cut = new Date(now - 400 * 86_400_000).toISOString().slice(0, 10);
+    await db.prepare("DELETE FROM usage_daily WHERE user_id=? AND day<?").bind(device.user_id, cut).run();
+  } catch {}
 
   return corsJson({ ok: true, synced: statements.length });
 };

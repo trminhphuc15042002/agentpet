@@ -349,6 +349,9 @@
 /* Care v5: native limits + to-next-level */
 "≈ %@ tokens to Lv %d" = "≈ %@ token 升到 Lv %d";
 "Subscription limits" = "訂閱額度";
+"Show %@ in Limits" = "在額度中顯示 %@";
+"Hidden providers stay out of the stats card and don't make your pet anxious." = "隱藏的服務不會出現在統計卡片中，也不會讓寵物焦慮。";
+"OpenUsage isn't responding, so the providers only it supplies are hidden." = "OpenUsage 沒有回應，因此只由它提供的服務已被隱藏。";
 "Read directly from your Claude Code / Codex sign-ins." = "直接從你的 Claude Code / Codex 登入讀取。";
 "Read directly from your Claude Code / Codex sign-ins. None found yet." = "直接從你的 Claude Code / Codex 登入讀取。暫未找到。";
 "Connected: adds limits for every other provider." = "已連線：補充其他所有服務商的額度。";
@@ -513,3 +516,15 @@
 "Bash approval gate" = "Bash 審批開關";
 "Approve Bash from the bubble" = "在氣泡中審批 Bash";
 "Claude Code Bash requests show Allow/Deny in the bubble instead of the terminal." = "Claude Code 的 Bash 請求會在氣泡中顯示允許/拒絕，而不必回到終端。";
+"Project names" = "專案名稱";
+"No projects seen yet." = "尚未發現專案。";
+"Projects used in the last 7 days. Show a friendlier name instead of the folder name in the bubble and notifications. Leave empty to use the folder name." = "最近 7 天使用過的專案。在氣泡和通知中顯示更易讀的名稱，取代資料夾名。留空則使用資料夾名。";
+"By agent" = "按 Agent";
+"Today · Month" = "今天 · 本月";
+"1 session" = "1 個工作階段";
+"%d sessions" = "%d 個工作階段";
+"Show less" = "收合";
+"Show %d more" = "再顯示 %d 項";
+"Limit" = "額度";
+"Search projects" = "搜尋專案";
+"No matching projects." = "沒有符合的專案。";

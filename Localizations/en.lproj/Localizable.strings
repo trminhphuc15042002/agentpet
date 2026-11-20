@@ -351,6 +351,9 @@
 /* Care v5: native limits + to-next-level */
 "≈ %@ tokens to Lv %d" = "≈ %@ tokens to Lv %d";
 "Subscription limits" = "Subscription limits";
+"Show %@ in Limits" = "Show %@ in Limits";
+"Hidden providers stay out of the stats card and don't make your pet anxious." = "Hidden providers stay out of the stats card and don't make your pet anxious.";
+"OpenUsage isn't responding, so the providers only it supplies are hidden." = "OpenUsage isn't responding, so the providers only it supplies are hidden.";
 "Read directly from your Claude Code / Codex sign-ins." = "Read directly from your Claude Code / Codex sign-ins.";
 "Read directly from your Claude Code / Codex sign-ins. None found yet." = "Read directly from your Claude Code / Codex sign-ins. None found yet.";
 "Connected: adds limits for every other provider." = "Connected: adds limits for every other provider.";
@@ -513,3 +516,15 @@
 "Bash approval gate" = "Bash approval gate";
 "Approve Bash from the bubble" = "Approve Bash from the bubble";
 "Claude Code Bash requests show Allow/Deny in the bubble instead of the terminal." = "Claude Code Bash requests show Allow/Deny in the bubble instead of the terminal.";
+"Project names" = "Project names";
+"No projects seen yet." = "No projects seen yet.";
+"Projects used in the last 7 days. Show a friendlier name instead of the folder name in the bubble and notifications. Leave empty to use the folder name." = "Projects used in the last 7 days. Show a friendlier name instead of the folder name in the bubble and notifications. Leave empty to use the folder name.";
+"By agent" = "By agent";
+"Today · Month" = "Today · Month";
+"1 session" = "1 session";
+"%d sessions" = "%d sessions";
+"Show less" = "Show less";
+"Show %d more" = "Show %d more";
+"Limit" = "Limit";
+"Search projects" = "Search projects";
+"No matching projects." = "No matching projects.";

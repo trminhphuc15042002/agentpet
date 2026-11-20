@@ -13,6 +13,7 @@ import { rateLimitKey } from "./limitTiers";
 export type Metric = "dailyTokens" | "sessionCount" | "hunger" | "streak" | "dailyMeals" | "rateLimit";
 
 const TH = {
+  rateLimit: { silent: 0.5, low: 0.15, high: 0.05 }, // fraction of budget left
   dailyTokens: { silent: 1_000_000, low: 3_000_000, mid: 6_000_000 },
   sessionCount: { silent: 5, low: 8 },
   streak: { silent: 4, low: 7, mid: 14 },
@@ -52,7 +53,7 @@ function checkCooldown(metric: Metric, now: number): boolean {
   return true;
 }
 
-function pool(metric: Metric, value: number | Hunger): string[] | null {
+function pool(metric: Metric, value: number | Hunger | null): string[] | null {
   switch (metric) {
     case "rateLimit": {
       const key = rateLimitKey(value as number);
@@ -109,7 +110,7 @@ export function enabled(): boolean {
 
 /// Returns a localized reactive line if the metric warrants one and its cooldown
 /// has elapsed, else null. Mutates cooldown state when it fires.
-export function evaluate(metric: Metric, value: number | Hunger, now = Date.now()): string | null {
+export function evaluate(metric: Metric, value: number | Hunger | null, now = Date.now()): string | null {
   if (!enabled()) return null;
   const phrases = pool(metric, value);
   if (!phrases) return null;

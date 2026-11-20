@@ -89,11 +89,20 @@ const STAGES = STAGE_DEFS.map(([name, startInternal, lastDisplay, open]) => {
               ["Community likes", fmt(s.totalLikes), "on shared pets"],
               ["Pet requests", s.requests, "submitted"],
             ];
+            const tr: any[] = s.trend || [];
+            const spark = (k: string) => {
+              if (tr.length < 2) return "";
+              const vs = tr.map((x) => Number(x[k]) || 0), mx = Math.max(1, ...vs), mn = Math.min(...vs);
+              const pts = vs.map((v, i) => `${(i / (vs.length - 1)) * 100},${22 - ((v - mn) / Math.max(1, mx - mn)) * 20}`).join(" ");
+              return `<svg viewBox="0 0 100 24" class="mt-2 h-6 w-full" preserveAspectRatio="none"><polyline points="${pts}" fill="none" stroke="#6366f1" stroke-width="1.5" vector-effect="non-scaling-stroke"/></svg>`;
+            };
+            const trendKey: Record<string, string> = { "Connected users": "connectedUsers", "Raised pets": "raisedPets", "Tokens fed": "totalTokens", "Sessions": "totalSessions" };
             box.innerHTML = cards.map(([label, val, sub]) => `
               <div class="card p-4">
                 <div class="font-pixel text-[10px] uppercase tracking-wide text-faint">${label}</div>
                 <div class="mt-1 font-display text-2xl font-bold text-ink">${val}</div>
                 ${sub ? `<div class="mt-0.5 text-[11px] text-faint">${sub}</div>` : ""}
+                ${trendKey[label] ? spark(trendKey[label]) : ""}
               </div>`).join("");
           })();
         </script>

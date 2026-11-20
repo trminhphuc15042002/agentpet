@@ -27,9 +27,9 @@ public enum TickerFormatter {
 
     /// One ticker line for a single session.
     /// Format: `<AgentLabel> [<project>] → <message>`
-    public static func line(for session: AgentSession) -> String {
+    public static func line(for session: AgentSession, projectNames: [String: String] = [:]) -> String {
         let label   = agentLabel(for: session.agentKind)
-        let project = session.project.map { ($0 as NSString).lastPathComponent } ?? session.id
+        let project = session.project.map { ProjectNames.label(for: $0, names: projectNames) } ?? session.id
         let msg: String
         if let m = session.message, !m.trimmingCharacters(in: .whitespaces).isEmpty {
             msg = m

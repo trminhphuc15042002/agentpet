@@ -12,6 +12,8 @@
 //  - The old code wrapped .play() in try/catch, which never caught the async
 //    rejection, and returned early, so one bad custom file muted everything.
 
+import { invoke } from "@tauri-apps/api/core";
+
 export type SoundEvent = "done" | "waiting";
 
 const TOGGLE: Record<SoundEvent, string> = { done: "ap_sound_done", waiting: "ap_sound_waiting" };
@@ -160,6 +162,13 @@ export async function playSound(ev: SoundEvent, opts?: { force?: boolean }): Pro
   if (data) {
     const buffer = await decodeCustom(data);
     if (buffer) { playBuffer(buffer); return true; }
+  }
+  // Default sound on Windows is the real system sound (Rust `play_sound`, the
+  // macOS Glass/Submarine equivalent). It has no volume control, so a lowered
+  // volume keeps using the synthesized chime.
+  if (navigator.userAgent.includes("Windows") && getVolume() === 100) {
+    invoke("play_sound", { event: ev }).catch(() => chime(ev));
+    return true;
   }
   chime(ev);
   return true;
