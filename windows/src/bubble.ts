@@ -5,7 +5,7 @@
 // (erase → retype → ellipsis-cycle/shimmer), state dots, and brand icons.
 
 import { invoke } from "@tauri-apps/api/core";
-import { Session, basename, agentLabel } from "./state";
+import { Session, agentLabel } from "./state";
 import { agentIconUrl, uiIcon } from "./icons";
 import { stateMessage, bubbleLine } from "./activity";
 import { t } from "./i18n";
@@ -16,6 +16,7 @@ import {
   visibleSessions as visibleSessionsPure,
   type Group as GroupBase,
 } from "./geometry";
+import { projectLabel } from "./projectnames";
 
 /// Stable hue from a custom agent's name so its lettered badge always gets the
 /// same color (issue #56, parity with the macOS CustomAgentIcon).
@@ -626,7 +627,7 @@ export class BubbleRenderer {
 
     const project = el.querySelector<HTMLElement>(".rproject");
     if (project) {
-      const base = s.project ? basename(s.project) : s.session;
+      const base = s.project ? projectLabel(s.project) : s.session;
       // Surface the driving agent/role (OpenCode) and, when it reports one, the
       // running cost, so subagent work and spend are visible at a glance.
       const parts = [base];

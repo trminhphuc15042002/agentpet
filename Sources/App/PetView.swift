@@ -865,6 +865,7 @@ private struct AgentRow: View {
     var chatStyle: Bool = false
     @ObservedObject private var settings = BubbleSettings.shared
     @ObservedObject private var bubbleMsgs = BubbleMessages.shared
+    @ObservedObject private var projectNames = ProjectNameStore.shared
     @Environment(\.animationsEnabled) private var animationsEnabled
 
     private var primaryPt: CGFloat { settings.fontSize.primaryPt }
@@ -1025,7 +1026,7 @@ private struct AgentRow: View {
     }
 
     private var projectName: String {
-        session.project.map { ($0 as NSString).lastPathComponent } ?? session.id
+        session.project.map { projectNames.label(for: $0) } ?? session.id
     }
 
     private var messageText: String {

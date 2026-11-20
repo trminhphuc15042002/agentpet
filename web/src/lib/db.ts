@@ -1,4 +1,12 @@
 import { env } from "cloudflare:workers";
+// Seed-generated data (see scripts/seed-data.mjs, scripts/analyze-pets.mjs). It only
+// changes when those scripts run, so it ships inside the worker bundle instead of
+// being scanned from D1 on every request. Re-seed, then redeploy to refresh.
+import PET_NUMBERS from "../data/pet-numbers.json";
+import PET_COLORS from "../data/pet-colors.json";
+import AUTO_COLLECTION_PETS from "../data/auto-collection-pets.json";
+import { COLOR_BY_KEY } from "./pet-color";
+import { matchRules } from "./collection-rules";
 
 // D1 access. Binding `DB` comes from wrangler.jsonc (local in dev via platformProxy,
 // real database in prod). Returns null if the binding isn't available.
@@ -39,6 +47,9 @@ export async function ensureSchema(db: any): Promise<void> {
     db.prepare("CREATE INDEX IF NOT EXISTS idx_pet_requests_status ON pet_requests (status)"),
     db.prepare("CREATE TABLE IF NOT EXISTS pet_numbers (slug TEXT PRIMARY KEY, num INTEGER NOT NULL)"),
     db.prepare("CREATE TABLE IF NOT EXISTS pet_meta (slug TEXT PRIMARY KEY, color TEXT)"),
+    // Dex number, colour and auto-collection membership for community pets approved
+    // after the last seed. Seeded pets live in the bundled JSON (src/data) instead.
+    db.prepare("CREATE TABLE IF NOT EXISTS community_meta (slug TEXT PRIMARY KEY, num INTEGER NOT NULL, color TEXT, collections TEXT NOT NULL DEFAULT '[]', updated_at INTEGER NOT NULL DEFAULT 0)"),
     // Tamagotchi sync: short-lived pairing codes, long-lived device tokens, and
     // the per-user per-pet care stats pushed by the desktop app.
     db.prepare("CREATE TABLE IF NOT EXISTS care_pair_codes (code TEXT PRIMARY KEY, user_id INTEGER NOT NULL, expires_at INTEGER NOT NULL)"),
@@ -58,6 +69,12 @@ export async function ensureSchema(db: any): Promise<void> {
   try { await db.prepare("ALTER TABLE care_pets ADD COLUMN thumb TEXT").run(); } catch {}
   try { await db.prepare("ALTER TABLE care_pets ADD COLUMN week TEXT").run(); } catch {}
   try { await db.prepare("ALTER TABLE care_pets ADD COLUMN achievements TEXT").run(); } catch {}
+  // usage_daily gained cost + token breakdown. Additive + idempotent; old rows stay 0.
+  for (const c of ["cost_usd REAL", "input_tokens INTEGER", "output_tokens INTEGER", "cache_read INTEGER", "cache_write INTEGER"]) {
+    try { await db.prepare(`ALTER TABLE usage_daily ADD COLUMN ${c} NOT NULL DEFAULT 0`).run(); } catch {}
+  }
+  // One row per day of the admin counters, so /admin can chart trends.
+  try { await db.prepare("CREATE TABLE IF NOT EXISTS admin_snapshots (day TEXT PRIMARY KEY, data TEXT NOT NULL, created_at INTEGER NOT NULL)").run(); } catch {}
   ready = true;
 }
 
@@ -75,34 +92,90 @@ export async function addNotification(
   } catch {}
 }
 
+// Per-isolate cache for the collections list (collections + hand-made members).
+// Admin collection edits invalidate it directly; otherwise it refreshes after the TTL.
+const CACHE_TTL_MS = 10 * 60 * 1000;
+const readCache = new Map<string, { at: number; value: unknown }>();
+
+async function cached<T>(key: string, load: () => Promise<T>): Promise<T> {
+  const hit = readCache.get(key);
+  if (hit && Date.now() - hit.at < CACHE_TTL_MS) return hit.value as T;
+  const value = await load();
+  readCache.set(key, { at: Date.now(), value });
+  return value;
+}
+
 // Analyzed dominant colour per pet (slug -> colour name), from the seed pipeline.
-export async function getColors(db: any): Promise<Record<string, string>> {
+type CommunityMeta = { num: number; color: string | null; collections: string[] };
+const BUNDLED_NUMBERS = PET_NUMBERS as Record<string, number>;
+const BUNDLED_COLORS = PET_COLORS as Record<string, string>;
+const BUNDLED_AUTO = AUTO_COLLECTION_PETS as Record<string, string[]>;
+
+// Community pets approved since the last seed (small table, cached per isolate).
+async function communityMeta(db: any): Promise<Record<string, CommunityMeta>> {
   if (!db) return {};
-  const r: any = await db.prepare("SELECT slug, color FROM pet_meta").all();
-  const m: Record<string, string> = {};
-  for (const row of r?.results ?? []) m[row.slug] = row.color;
+  return cached("community", async () => {
+    const r: any = await db.prepare("SELECT slug, num, color, collections FROM community_meta").all();
+    const m: Record<string, CommunityMeta> = {};
+    for (const row of r?.results ?? []) {
+      if (BUNDLED_NUMBERS[row.slug] != null) continue; // a re-seed already covers it
+      let cols: string[] = [];
+      try { cols = JSON.parse(row.collections || "[]"); } catch {}
+      m[row.slug] = { num: row.num, color: row.color, collections: cols };
+    }
+    return m;
+  });
+}
+
+export async function getColors(db: any): Promise<Record<string, string>> {
+  const extra = await communityMeta(db);
+  if (!Object.keys(extra).length) return BUNDLED_COLORS;
+  const m = { ...BUNDLED_COLORS };
+  for (const [slug, c] of Object.entries(extra)) if (c.color) m[slug] = c.color;
   return m;
 }
 
 export async function getColor(db: any, slug: string): Promise<string> {
-  if (!db) return "";
-  const r: any = await db.prepare("SELECT color FROM pet_meta WHERE slug=?").bind(slug).first();
-  return r?.color ?? "";
+  return BUNDLED_COLORS[slug] ?? (await communityMeta(db))[slug]?.color ?? "";
 }
 
-// Stable dex numbers (slug -> NNNNN), assigned by the data seed. Map for bulk views.
 export async function getNumbers(db: any): Promise<Record<string, number>> {
-  if (!db) return {};
-  const r: any = await db.prepare("SELECT slug, num FROM pet_numbers").all();
-  const m: Record<string, number> = {};
-  for (const row of r?.results ?? []) m[row.slug] = row.num;
+  const extra = await communityMeta(db);
+  if (!Object.keys(extra).length) return BUNDLED_NUMBERS;
+  const m = { ...BUNDLED_NUMBERS };
+  for (const [slug, c] of Object.entries(extra)) m[slug] = c.num;
   return m;
 }
 
 export async function getNumber(db: any, slug: string): Promise<number | null> {
-  if (!db) return null;
-  const r: any = await db.prepare("SELECT num FROM pet_numbers WHERE slug=?").bind(slug).first();
-  return r?.num ?? null;
+  return BUNDLED_NUMBERS[slug] ?? (await communityMeta(db))[slug]?.num ?? null;
+}
+
+// Gives a newly approved community pet a dex number, colour and auto collections,
+// using the same rules as the seed scripts. Keeps an existing number on re-approve.
+export async function assignCommunityMeta(db: any, slug: string, name: string, kind: string, color: string | null): Promise<void> {
+  if (BUNDLED_NUMBERS[slug] != null) return;
+  const safeColor = color && COLOR_BY_KEY[color] ? color : null;
+  const collections = matchRules(name || slug, kind || "");
+  if (safeColor) collections.push(COLOR_BY_KEY[safeColor].id);
+  const bundledMax = Math.max(0, ...Object.values(BUNDLED_NUMBERS));
+  await db
+    .prepare(
+      `INSERT INTO community_meta (slug, num, color, collections, updated_at)
+       VALUES (?1, MAX(?2, COALESCE((SELECT MAX(num) FROM community_meta), 0)) + 1, ?3, ?4, ?5)
+       ON CONFLICT(slug) DO UPDATE SET color = excluded.color, collections = excluded.collections, updated_at = excluded.updated_at`,
+    )
+    .bind(slug, bundledMax, safeColor, JSON.stringify(collections), Date.now())
+    .run();
+  readCache.delete("community");
+  readCache.delete("collections");
+}
+
+// Pulls a community pet out of the auto collections (rejected / unpublished).
+export async function removeCommunityMeta(db: any, slug: string): Promise<void> {
+  await db.prepare("UPDATE community_meta SET collections = '[]', updated_at = ? WHERE slug = ?").bind(Date.now(), slug).run();
+  readCache.delete("community");
+  readCache.delete("collections");
 }
 
 // ---- pet requests (community wishlist) ----
@@ -155,13 +228,24 @@ export async function deleteRequest(db: any, id: string): Promise<void> {
 export interface Collection { id: string; title: string; slug: string; description: string | null; created_at: number; }
 
 export async function listCollections(db: any): Promise<(Collection & { count: number; samples: string[] })[]> {
-  const c: any = await db.prepare("SELECT * FROM collections ORDER BY created_at DESC, slug ASC").all();
-  const cols: Collection[] = c?.results ?? [];
-  if (!cols.length) return [];
-  const m: any = await db.prepare("SELECT collection_id, slug FROM collection_pets ORDER BY added_at ASC").all();
-  const byCol: Record<string, string[]> = {};
-  for (const r of m?.results ?? []) (byCol[r.collection_id] ||= []).push(r.slug);
-  return cols.map((col) => ({ ...col, count: (byCol[col.id] || []).length, samples: (byCol[col.id] || []).slice(0, 5) }));
+  return cached("collections", async () => {
+    const c: any = await db.prepare("SELECT * FROM collections ORDER BY created_at DESC, slug ASC").all();
+    const cols: Collection[] = c?.results ?? [];
+    if (!cols.length) return [];
+    // Auto collections come from the bundled seed JSON; only hand-made ones hit D1.
+    const byCol: Record<string, string[]> = {};
+    for (const [id, slugs] of Object.entries(BUNDLED_AUTO)) byCol[id] = [...slugs];
+    for (const [slug, c] of Object.entries(await communityMeta(db))) for (const id of c.collections) (byCol[id] ||= []).push(slug);
+    const manual = cols.filter((col) => !col.id.startsWith("auto-")).map((col) => col.id);
+    if (manual.length) {
+      const m: any = await db
+        .prepare(`SELECT collection_id, slug FROM collection_pets WHERE collection_id IN (${manual.map(() => "?").join(",")}) ORDER BY added_at ASC`)
+        .bind(...manual)
+        .all();
+      for (const r of m?.results ?? []) (byCol[r.collection_id] ||= []).push(r.slug);
+    }
+    return cols.map((col) => ({ ...col, count: (byCol[col.id] || []).length, samples: (byCol[col.id] || []).slice(0, 5) }));
+  });
 }
 
 export async function getCollection(db: any, slug: string): Promise<Collection | null> {
@@ -169,6 +253,10 @@ export async function getCollection(db: any, slug: string): Promise<Collection |
 }
 
 export async function collectionSlugs(db: any, collectionId: string): Promise<string[]> {
+  if (collectionId.startsWith("auto-")) {
+    const extra = Object.entries(await communityMeta(db)).filter(([, c]) => c.collections.includes(collectionId)).map(([slug]) => slug);
+    return [...(BUNDLED_AUTO[collectionId] ?? []), ...extra];
+  }
   const r: any = await db.prepare("SELECT slug FROM collection_pets WHERE collection_id=? ORDER BY added_at ASC").bind(collectionId).all();
   return (r?.results ?? []).map((x: any) => x.slug);
 }
@@ -178,11 +266,20 @@ export async function collectionsForPet(db: any, slug: string): Promise<{ title:
     .prepare("SELECT c.title AS title, c.slug AS slug FROM collection_pets cp JOIN collections c ON c.id = cp.collection_id WHERE cp.slug=? ORDER BY c.created_at ASC")
     .bind(slug)
     .all();
-  return r?.results ?? [];
+  const rows: { title: string; slug: string }[] = r?.results ?? [];
+  const extra = (await communityMeta(db))[slug]?.collections ?? [];
+  if (!extra.length) return rows;
+  const c: any = await db
+    .prepare(`SELECT title, slug FROM collections WHERE id IN (${extra.map(() => "?").join(",")}) ORDER BY created_at ASC`)
+    .bind(...extra)
+    .all();
+  const seen = new Set(rows.map((x) => x.slug));
+  return [...rows, ...(c?.results ?? []).filter((x: any) => !seen.has(x.slug))];
 }
 
 export async function createCollection(db: any, id: string, title: string, slug: string, description: string | null): Promise<void> {
   await db.prepare("INSERT INTO collections (id, title, slug, description, created_at) VALUES (?, ?, ?, ?, ?)").bind(id, title, slug, description, Date.now()).run();
+  readCache.delete("collections");
 }
 
 export async function deleteCollection(db: any, id: string): Promise<void> {
@@ -190,14 +287,17 @@ export async function deleteCollection(db: any, id: string): Promise<void> {
     db.prepare("DELETE FROM collection_pets WHERE collection_id=?").bind(id),
     db.prepare("DELETE FROM collections WHERE id=?").bind(id),
   ]);
+  readCache.delete("collections");
 }
 
 export async function addPetToCollection(db: any, id: string, slug: string): Promise<void> {
   await db.prepare("INSERT OR IGNORE INTO collection_pets (collection_id, slug, added_at) VALUES (?, ?, ?)").bind(id, slug, Date.now()).run();
+  readCache.delete("collections");
 }
 
 export async function removePetFromCollection(db: any, id: string, slug: string): Promise<void> {
   await db.prepare("DELETE FROM collection_pets WHERE collection_id=? AND slug=?").bind(id, slug).run();
+  readCache.delete("collections");
 }
 
 // ---- community submissions ----

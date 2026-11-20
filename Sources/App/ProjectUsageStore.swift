@@ -89,6 +89,28 @@ final class ProjectUsageStore: ObservableObject {
 
     // MARK: - Sync support
 
+    /// Projects seen so far as (id, folder name), most recently used first. Only
+    /// those used in the last `withinDays` days, plus any id in `alwaysInclude`
+    /// (projects that already have a name), so the Settings list stays short.
+    func knownProjects(withinDays: Int = 7, alwaysInclude: Set<String> = []) -> [(id: String, folder: String)] {
+        let cutoff = Self.dayString(daysAgo: withinDays)
+        var latest: [String: (day: String, folder: String)] = [:]
+        for r in rows.values where latest[r.projectId].map({ r.day > $0.day }) ?? true {
+            latest[r.projectId] = (r.day, r.projectName)
+        }
+        return latest
+            .filter { $0.value.day >= cutoff || alwaysInclude.contains($0.key) }
+            .sorted { $0.value.day != $1.value.day ? $0.value.day > $1.value.day : $0.value.folder < $1.value.folder }
+            .map { (id: $0.key, folder: $0.value.folder) }
+    }
+
+    /// Tokens and sessions per agent for today and this calendar month.
+    func byAgent() -> [AgentUsageTotal] {
+        AgentUsage.totals(
+            rows.values.map { AgentUsage.Record(agent: $0.agent, day: $0.day, tokens: $0.tokens, sessions: $0.sessions) },
+            today: Self.today())
+    }
+
     /// Dirty rows to push. Grow-only + server MAX means re-pushing is harmless.
     func pendingRows() -> [Row] { dirty.compactMap { rows[$0] } }
     var hasPending: Bool { !dirty.isEmpty }
@@ -106,14 +128,9 @@ final class ProjectUsageStore: ObservableObject {
     // MARK: - Helpers
 
     static func projectIdentity(_ path: String) -> (id: String, name: String) {
-        let last = (path as NSString).lastPathComponent
-        let name = last.isEmpty ? path : last
-        return ("p" + String(format: "%08x", fnv1a(path)), String(name.prefix(60)))
-    }
-    private static func fnv1a(_ s: String) -> UInt32 {
-        var h: UInt32 = 2166136261
-        for b in s.utf8 { h ^= UInt32(b); h = h &* 16777619 }
-        return h
+        // One hash for the usage rows and the custom names (ProjectNames), so a
+        // name can never stop matching its project.
+        (ProjectNames.id(for: path), String(ProjectNames.folderName(path).prefix(60)))
     }
     private static func today() -> String {
         let f = DateFormatter()

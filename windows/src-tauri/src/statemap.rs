@@ -30,6 +30,7 @@ pub fn state(kind: &str, event: &str) -> Option<&'static str> {
             "UserPromptSubmit" | "PreToolUse" | "PostToolUse" | "SubagentStart" => Some("working"),
             "PermissionRequest" => Some("waiting"),
             "Stop" | "SubagentStop" => Some("done"),
+            "Interrupt" => Some("idle"),
             _ => None,
         },
         // Factory Droid CLI: same Claude-nested payload; Notification is a
@@ -97,9 +98,9 @@ pub fn state(kind: &str, event: &str) -> Option<&'static str> {
             "stop" => Some("done"),
             _ => None,
         },
-        // jcode observer hooks. post_tool doubles as a heartbeat so a long
-        // turn isn't pruned as stale. A turn ending on a question arrives
-        // pre-normalised as "waiting" (generic path above).
+        // jcode observer hooks (port of the macOS StateMapper). post_tool doubles
+        // as a heartbeat so a long turn isn't pruned as stale. A turn ending on a
+        // question arrives pre-normalised as "waiting" (handled at the top).
         "jcode" => match event {
             "session_start" => Some("registered"),
             "turn_start" | "post_tool" => Some("working"),
@@ -123,7 +124,7 @@ pub fn state(kind: &str, event: &str) -> Option<&'static str> {
 pub fn is_session_end(kind: &str, event: &str) -> bool {
     matches!(
         (kind, event),
-        ("claude", "SessionEnd") | ("gemini", "SessionEnd") | ("cursor", "sessionEnd") | ("droid", "SessionEnd")
+        ("claude", "SessionEnd") | ("codex", "SessionEnd") | ("gemini", "SessionEnd") | ("cursor", "sessionEnd") | ("droid", "SessionEnd")
             | ("grok", "session_end") | ("jcode", "session_end") | ("hermes", "on_session_end")
     )
 }
@@ -131,6 +132,23 @@ pub fn is_session_end(kind: &str, event: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn codex_interrupt_goes_idle_and_stop_stays_done() {
+        assert_eq!(state("codex", "Interrupt"), Some("idle"));
+        assert_eq!(state("codex", "Stop"), Some("done"));
+        assert_eq!(state("codex", "SubagentStop"), Some("done"));
+        assert_eq!(state("codex", "UserPromptSubmit"), Some("working"));
+        assert_eq!(state("codex", "SessionEnd"), None);
+        assert_eq!(state("claude", "Interrupt"), None);
+    }
+
+    #[test]
+    fn codex_session_end_removes_the_session() {
+        assert!(is_session_end("codex", "SessionEnd"));
+        assert!(!is_session_end("codex", "Stop"));
+        assert!(!is_session_end("codex", "Interrupt"));
+    }
 
     #[test]
     fn hermes_lifecycle() {

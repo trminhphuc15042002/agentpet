@@ -18,9 +18,10 @@ public enum ReactiveMetric: Hashable {
 
 // MARK: - Thresholds
 
-private enum Thresholds {
+enum Thresholds {
     enum RateLimit {
         static let silent: Double = 0.5
+        /// Below this much left the bubble warns and the pet turns anxious.
         static let low: Double = 0.15
         static let high: Double = 0.05
     }
@@ -265,4 +266,3 @@ public final class ReactiveEngine {
         }
     }
 }
-

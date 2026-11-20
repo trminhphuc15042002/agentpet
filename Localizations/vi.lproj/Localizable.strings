@@ -349,6 +349,9 @@
 /* Care v5: native limits + to-next-level */
 "≈ %@ tokens to Lv %d" = "≈ %@ token để lên Lv %d";
 "Subscription limits" = "Hạn mức gói";
+"Show %@ in Limits" = "Hiện %@ trong Hạn mức";
+"Hidden providers stay out of the stats card and don't make your pet anxious." = "AI bị ẩn không hiện trên thẻ thống kê và không làm pet lo lắng.";
+"OpenUsage isn't responding, so the providers only it supplies are hidden." = "OpenUsage không phản hồi nên các AI chỉ có từ OpenUsage đang bị ẩn.";
 "Read directly from your Claude Code / Codex sign-ins." = "Đọc trực tiếp từ đăng nhập Claude Code / Codex của bạn.";
 "Read directly from your Claude Code / Codex sign-ins. None found yet." = "Đọc trực tiếp từ đăng nhập Claude Code / Codex. Chưa tìm thấy.";
 "Connected: adds limits for every other provider." = "Đã kết nối: bổ sung hạn mức cho mọi nhà cung cấp khác.";
@@ -514,3 +517,15 @@
 "Bash approval gate" = "Cổng duyệt Bash";
 "Approve Bash from the bubble" = "Duyệt Bash từ bong bóng";
 "Claude Code Bash requests show Allow/Deny in the bubble instead of the terminal." = "Yêu cầu Bash của Claude Code hiện Cho phép/Từ chối trong bong bóng thay vì ở terminal.";
+"Project names" = "Tên project";
+"No projects seen yet." = "Chưa có project nào.";
+"Projects used in the last 7 days. Show a friendlier name instead of the folder name in the bubble and notifications. Leave empty to use the folder name." = "Các project dùng trong 7 ngày qua. Hiện tên dễ nhớ thay cho tên thư mục trong bubble và thông báo. Để trống để dùng tên thư mục.";
+"By agent" = "Theo agent";
+"Today · Month" = "Hôm nay · Tháng";
+"1 session" = "1 phiên";
+"%d sessions" = "%d phiên";
+"Show less" = "Thu gọn";
+"Show %d more" = "Xem thêm %d";
+"Limit" = "Hạn mức";
+"Search projects" = "Tìm project";
+"No matching projects." = "Không có project nào khớp.";

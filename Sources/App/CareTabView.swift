@@ -7,6 +7,7 @@ struct CareTabView: View {
     @ObservedObject private var care = PetCareController.shared
     @ObservedObject private var usage = OpenUsageClient.shared
     @ObservedObject private var probe = NativeUsageProbe.shared
+    @ObservedObject private var visibility = UsageVisibility.shared
     @ObservedObject private var sync = CareSyncController.shared
     @ObservedObject private var pet = PetController.shared
     @ObservedObject private var imagePets = ImagePetStore.shared
@@ -63,7 +64,7 @@ struct CareTabView: View {
                         Text(xpCaption)
                             .font(.caption).foregroundStyle(.secondary)
                         Text(String(format: NSLocalizedString("≈ %@ tokens to Lv %d", comment: ""),
-                                    Self.tokenString(PetCare.tokensToNextLevel(state: care.current)),
+                                    CareFormat.tokens(PetCare.tokensToNextLevel(state: care.current)),
                                     care.level + 1))
                             .font(.caption).foregroundStyle(stageColor)
                     }
@@ -76,7 +77,7 @@ struct CareTabView: View {
             Section("Hunger") {
                 VStack(alignment: .leading, spacing: 6) {
                     HStack {
-                        Text(hungerLabel)
+                        Text(CareFormat.hunger(care.hunger))
                         Spacer()
                         if let last = care.current.lastFedAt {
                             Text(String(format: NSLocalizedString("Last fed %@", comment: ""),
@@ -94,7 +95,7 @@ struct CareTabView: View {
 
             Section("Today") {
                 LabeledContent("Tokens eaten") {
-                    Text(verbatim: Self.plain(care.current.tokensToday))
+                    Text(verbatim: CareFormat.plain(care.current.tokensToday))
                 }
                 LabeledContent("Sessions finished", value: "\(care.current.mealsToday)")
                 LabeledContent("Streak") {
@@ -105,9 +106,11 @@ struct CareTabView: View {
             }
 
             Section("Lifetime") {
-                LabeledContent("Total tokens eaten", value: Self.plain(care.current.totalTokens))
+                LabeledContent("Total tokens eaten", value: CareFormat.plain(care.current.totalTokens))
                 LabeledContent("Total sessions", value: "\(care.current.totalMeals)")
             }
+
+            AgentUsageSection()
 
             Section {
                 let unlocked = care.achievements
@@ -209,7 +212,7 @@ struct CareTabView: View {
                 Text("Connecting is optional. Your pet, its level and all stats live on this Mac whether or not you sign in, nothing leaves your machine until you connect.")
             }
 
-            Section("Food sources") {
+            Section {
                 HStack {
                     VStack(alignment: .leading, spacing: 2) {
                         Text("Claude Code transcripts")
@@ -226,6 +229,15 @@ struct CareTabView: View {
                              ? "Read directly from your Claude Code / Codex sign-ins. None found yet."
                              : "Read directly from your Claude Code / Codex sign-ins.")
                             .font(.caption).foregroundStyle(.secondary)
+                        // Inside this row, not a row of its own: a Form row added or
+                        // removed when `lost` flips kept its old height and drew over
+                        // the toggle below it.
+                        if usage.lost {
+                            Label("OpenUsage isn't responding, so the providers only it supplies are hidden.",
+                                  systemImage: "exclamationmark.triangle")
+                                .font(.caption).foregroundStyle(.orange)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
                     }
                     Spacer()
                     if !probe.providers.isEmpty {
@@ -233,25 +245,22 @@ struct CareTabView: View {
                     }
                 }
                 ForEach(NativeUsageProbe.combined()) { p in
-                    let used = 1 - (p.fractionLeft ?? 0)
-                    let color: Color = used > 0.9 ? .red : (used > 0.75 ? .orange : stageColor)
                     VStack(alignment: .leading, spacing: 4) {
-                        HStack(spacing: 6) {
-                            Text(verbatim: p.displayName).font(.callout.weight(.medium))
-                            if let w = p.windowLabel {
-                                Text(verbatim: w).font(.caption).foregroundStyle(.secondary)
-                            }
-                            Spacer()
-                            Text(String(format: NSLocalizedString("%d%% used", comment: ""), Int((used * 100).rounded())))
-                                .font(.caption.weight(.semibold)).foregroundStyle(color)
-                            if let reset = PetStatsView.resetText(p.resetsAt) {
-                                Text(verbatim: "· \(reset)").font(.caption).foregroundStyle(.secondary)
-                            }
+                        Toggle(isOn: visibility.binding(for: p.id)) {
+                            Text(String(format: NSLocalizedString("Show %@ in Limits", comment: "per-provider toggle"), p.displayName))
+                                .font(.caption)
                         }
-                        ProgressView(value: used).tint(color)
+                        .toggleStyle(.switch).controlSize(.mini)
+                        if visibility.isVisible(p.id) {
+                            LimitWindowsView(provider: p, tint: stageColor, compact: false)
+                        }
                     }
                     .padding(.vertical, 2)
                 }
+            } header: {
+                Text("Food sources")
+            } footer: {
+                Text("Hidden providers stay out of the stats card and don't make your pet anxious.")
             }
         }
         .formStyle(.grouped)
@@ -306,7 +315,7 @@ struct CareTabView: View {
             Spacer()
             VStack(alignment: .trailing, spacing: 2) {
                 Text(verbatim: "Lv \(lv)").font(.system(size: 12, weight: .bold))
-                Text(verbatim: "\(Self.plain(s.xp)) XP")
+                Text(verbatim: "\(CareFormat.plain(s.xp)) XP")
                     .font(.caption2).foregroundStyle(.secondary)
             }
         }
@@ -321,7 +330,7 @@ struct CareTabView: View {
     private var xpCaption: String {
         let (inLevel, span) = PetCare.xpWithinLevel(forXP: care.current.xp)
         return String(format: NSLocalizedString("%@ / %@ XP to next level", comment: ""),
-                      Self.plain(inLevel), Self.plain(span))
+                      CareFormat.plain(inLevel), CareFormat.plain(span))
     }
 
     /// Continuous fullness 0…1 from the time since the last feeding (48h → empty).
@@ -329,29 +338,5 @@ struct CareTabView: View {
         guard let last = care.current.lastFedAt else { return 0.5 }
         let hours = now.timeIntervalSince(last) / 3600
         return max(0, min(1, 1 - hours / 48))
-    }
-
-    private var hungerLabel: String {
-        switch care.hunger {
-        case .full: return NSLocalizedString("Full", comment: "hunger")
-        case .satisfied: return NSLocalizedString("Satisfied", comment: "hunger")
-        case .peckish: return NSLocalizedString("Peckish", comment: "hunger")
-        case .hungry: return NSLocalizedString("Hungry", comment: "hunger")
-        case .starving: return NSLocalizedString("Starving", comment: "hunger")
-        }
-    }
-
-    private static func tokenString(_ n: Int) -> String {
-        switch n {
-        case 1_000_000...: return String(format: "%.1fM", Double(n) / 1_000_000)
-        case 1_000...: return String(format: "%.0fk", Double(n) / 1_000)
-        default: return "\(n)"
-        }
-    }
-
-    private static func plain(_ n: Int) -> String {
-        let f = NumberFormatter()
-        f.numberStyle = .decimal
-        return f.string(from: NSNumber(value: n)) ?? "\(n)"
     }
 }

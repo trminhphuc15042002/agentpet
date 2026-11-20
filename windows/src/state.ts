@@ -148,6 +148,13 @@ export class SessionStore {
     this.pendingSubagents.set(e.session, pending);
   }
 
+  /// Late title for a session (jcode resolves it off-thread). Only updates a
+  /// session that still exists, so a slow lookup can't bring an ended one back.
+  setTitle(agent: string, session: string, title: string) {
+    const s = this.sessions.get(`${agent}:${session}`);
+    if (s && title) s.title = title;
+  }
+
   remove(session: string) {
     this.pendingSubagents.delete(session);
     for (const k of [...this.sessions.keys()]) {

@@ -24,7 +24,6 @@ enum Style {
     AntigravityNested, // {"agentpet": {Event: [..]}} (matcher events vs bare handlers)
     OpencodePlugin,    // a JS plugin file
     PiExtension,       // a TS extension file for Pi (~/.pi/agent/extensions)
-    JcodeToml,         // ~/.jcode/config.toml [hooks] key = "command"
     HermesYaml,        // Hermes config.yaml `hooks:` block: event -> [{command:..}]
 }
 
@@ -39,7 +38,7 @@ fn spec(kind: &str) -> Option<Spec> {
         "claude" => Spec { style: Style::ClaudeNested, rel_path: &[".claude", "settings.json"],
             events: &["SessionStart", "UserPromptSubmit", "PreToolUse", "Notification", "Stop", "SubagentStop", "SessionEnd"] },
         "codex" => Spec { style: Style::ClaudeNested, rel_path: &[".codex", "hooks.json"],
-            events: &["SessionStart", "UserPromptSubmit", "PreToolUse", "PermissionRequest", "Stop", "SubagentStart", "SubagentStop"] },
+            events: &["SessionStart", "UserPromptSubmit", "PreToolUse", "PermissionRequest", "Stop", "Interrupt", "SessionEnd", "SubagentStart", "SubagentStop"] },
         "gemini" => Spec { style: Style::ClaudeNested, rel_path: &[".gemini", "settings.json"],
             events: &["SessionStart", "BeforeAgent", "BeforeTool", "AfterTool", "Notification", "AfterAgent", "SessionEnd"] },
         "cursor" => Spec { style: Style::CursorFlat, rel_path: &[".cursor", "hooks.json"],
@@ -63,10 +62,6 @@ fn spec(kind: &str) -> Option<Spec> {
         // hook's exit 2 as deny/keep-working, and our hook always exits 0.
         "grok" => Spec { style: Style::ClaudeNested, rel_path: &[".grok", "hooks", "agentpet.json"],
             events: &["SessionStart", "UserPromptSubmit", "PostToolUse", "Notification", "Stop", "SessionEnd"] },
-        // Observers only: jcode spawns them detached. pre_tool (a blocking gate)
-        // is deliberately not used.
-        "jcode" => Spec { style: Style::JcodeToml, rel_path: &[".jcode", "config.toml"],
-            events: &["session_start", "turn_start", "post_tool", "turn_end", "session_end"] },
         // Hermes Agent (Nous Research): shell hooks in config.yaml, one home per
         // profile. `pre_tool_call` is the only blocking event, so the pet uses
         // observers only (turn start/tool end/done) rather than gating tools.
@@ -91,7 +86,7 @@ pub fn catalog() -> Vec<AgentInfo> {
         ("droid", "Factory Droid", Some("Factory Droid CLI (~/.factory/hooks.json)")),
         ("pi", "Pi", Some("Pi extension (~/.pi/agent/extensions). No \"needs input\" alerts")),
         ("grok", "Grok Build", Some("xAI Grok Build CLI (~/.grok/hooks/agentpet.json)")),
-        ("jcode", "jcode", Some("jcode lifecycle hooks (~/.jcode/config.toml)")),
+        ("jcode", "jcode", Some("jcode lifecycle hooks (~/.jcode/config.toml, in WSL when present)")),
         ("hermes", "Hermes Agent", Some("Hermes Agent CLI (%LOCALAPPDATA%\\hermes\\config.yaml, all profiles)")),
     ];
     entries.iter().map(|(kind, name, note)| AgentInfo {
@@ -172,12 +167,18 @@ fn make_entry(style: Style, event: &str, cmd: &str) -> Value {
         } else {
             json!({ "type": "command", "command": cmd })
         },
-        Style::OpencodePlugin | Style::PiExtension | Style::JcodeToml | Style::HermesYaml => Value::Null,
+        Style::OpencodePlugin | Style::PiExtension | Style::HermesYaml => Value::Null,
     }
 }
 
 // ----- public API ----------------------------------------------------------
 pub fn is_installed(kind: &str) -> bool {
+    if kind == "jcode" {
+        return jcode_target()
+            // A read error here only means "not detected": nothing is written.
+            .map(|t| crate::jcode::is_installed(&std::fs::read_to_string(&t.config).unwrap_or_default(), crate::jcode::EVENTS))
+            .unwrap_or(false);
+    }
     let Some(s) = spec(kind) else { return false };
     if s.style == Style::HermesYaml {
         // Installed only when every home Hermes reads carries the hook; a new
@@ -190,11 +191,6 @@ pub fn is_installed(kind: &str) -> bool {
         });
     }
     let Some(path) = config_path(kind) else { return false };
-    if s.style == Style::JcodeToml {
-        return jcode::read_or_empty(&path)
-            .map(|text| jcode::is_installed(&text, s.events))
-            .unwrap_or(false);
-    }
     if s.style == Style::OpencodePlugin || s.style == Style::PiExtension {
         return std::fs::read_to_string(&path).map(|c| is_ours(&c)).unwrap_or(false);
     }
@@ -218,6 +214,7 @@ pub fn toggle(kind: &str) -> Result<bool, String> {
 }
 
 fn install(kind: &str) -> std::io::Result<()> {
+    if kind == "jcode" { return jcode_install(); }
     let Some(s) = spec(kind) else {
         return Err(std::io::Error::new(std::io::ErrorKind::Other, "unknown agent"));
     };
@@ -245,9 +242,6 @@ fn install(kind: &str) -> std::io::Result<()> {
     if s.style == Style::PiExtension {
         if let Some(dir) = path.parent() { std::fs::create_dir_all(dir)?; }
         return std::fs::write(&path, pi_extension(&binary_from(&cmd)));
-    }
-    if s.style == Style::JcodeToml {
-        return jcode::install_to_disk(&cmd, &path, s.events);
     }
 
     let mut v = read_json(&path);
@@ -277,15 +271,13 @@ fn install(kind: &str) -> std::io::Result<()> {
 }
 
 fn uninstall(kind: &str) -> std::io::Result<()> {
+    if kind == "jcode" { return jcode_uninstall(); }
     let Some(s) = spec(kind) else { return Ok(()) };
     let cmd = full_command(kind);
     if s.style == Style::HermesYaml {
         return hermes::uninstall_all(&config_paths(kind), &cmd, s.events);
     }
     let Some(path) = config_path(kind) else { return Ok(()) };
-    if s.style == Style::JcodeToml {
-        return jcode::uninstall_from_disk(&path, s.events);
-    }
     // Files we own outright: just delete.
     if kind == "copilot" || s.style == Style::OpencodePlugin || s.style == Style::PiExtension {
         let _ = std::fs::remove_file(&path);
@@ -529,427 +521,249 @@ fn enable_codex_hooks() {
     let _ = std::fs::write(&path, updated);
 }
 
-/// Line-preserving editor for jcode's `~/.jcode/config.toml` `[hooks]` table.
-/// Comments, unrelated keys, and newline style stay intact. Foreign or array
-/// values are refused rather than merged.
-mod jcode {
+// ----- jcode (TOML [hooks], usually inside WSL) -----------------------------
+
+/// Where jcode's config lives and what hook command jcode should run.
+struct JcodeTarget {
+    config: PathBuf,
+    command: String,
+}
+
+/// Prefer the default WSL distro's `~/.jcode` (jcode is a Linux/macOS CLI and on
+/// Windows it typically runs under WSL), else a native `%USERPROFILE%\.jcode`.
+/// simplify: default distro only; a per-distro picker is the upgrade path.
+fn jcode_target() -> Option<JcodeTarget> {
+    let exe = std::env::current_exe().ok()?;
+    let (home, via_wsl) = jcode_home()?;
+    let config = home.join(".jcode").join("config.toml");
+    let command = if via_wsl {
+        crate::jcode::hook_command(&windows_to_wsl_path(&exe.to_string_lossy()), true)
+    } else {
+        crate::jcode::hook_command(&exe.to_string_lossy(), false)
+    };
+    Some(JcodeTarget { config, command })
+}
+
+/// `C:\Users\A\x.exe` -> `/mnt/c/Users/A/x.exe` (WSL's default automount root).
+/// simplify: assumes automount root /mnt; a custom root in /etc/wsl.conf would
+/// need `wslpath -u` instead.
+pub fn windows_to_wsl_path(p: &str) -> String {
+    let p = p.trim_start_matches(r"\\?\");
+    let mut chars = p.chars();
+    match (chars.next(), chars.next()) {
+        (Some(d), Some(':')) if d.is_ascii_alphabetic() => {
+            format!("/mnt/{}{}", d.to_ascii_lowercase(), p[2..].replace('\\', "/"))
+        }
+        _ => p.replace('\\', "/"),
+    }
+}
+
+fn jcode_write(path: &PathBuf, text: &str) -> std::io::Result<()> {
+    if let Some(dir) = path.parent() { std::fs::create_dir_all(dir)?; }
+    // Write-then-rename: jcode re-reads config.toml on change, never a partial one.
+    let tmp = path.with_extension("toml.agentpet-tmp");
+    std::fs::write(&tmp, text)?;
+    std::fs::rename(&tmp, path)
+}
+
+/// Reads config.toml. A missing file is an empty config (first install); ANY
+/// other error (a `\\wsl.localhost` hiccup while the VM starts, a permission
+/// error, non-UTF-8 content) is returned so the caller aborts. Treating those as
+/// "empty" would make install rewrite the file with only the `[hooks]` block and
+/// wipe the user's jcode config.
+fn read_config(path: &PathBuf) -> std::io::Result<String> {
+    match std::fs::read_to_string(path) {
+        Ok(s) => Ok(s),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(String::new()),
+        Err(e) => Err(e),
+    }
+}
+
+fn jcode_install() -> std::io::Result<()> {
+    // Enabling jcode is the one moment we look for it inside WSL (see the note on
+    // jcode_home): opt-in, with a timeout, and we are already off the UI thread.
+    probe_jcode_wsl();
+    let t = jcode_target().ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "jcode config not found"))?;
+    let existing = read_config(&t.config)?;
+    let updated = crate::jcode::install(&existing, &t.command, crate::jcode::EVENTS)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+    if updated != existing { jcode_write(&t.config, &updated)?; }
+    Ok(())
+}
+
+fn jcode_uninstall() -> std::io::Result<()> {
+    // No probe here: uninstall edits the config where install put it (the cached
+    // WSL home). If WSL is down the read fails and we abort instead of editing
+    // the native config and leaving the WSL hooks behind.
+    let Some(t) = jcode_target() else { return Ok(()) };
+    let existing = read_config(&t.config)?;
+    let updated = crate::jcode::uninstall(&existing, crate::jcode::EVENTS);
+    if updated != existing { jcode_write(&t.config, &updated)?; }
+    Ok(())
+}
+
+#[cfg(test)]
+mod jcode_path_tests {
+    use super::windows_to_wsl_path;
+
+    #[test]
+    fn converts_drive_paths() {
+        assert_eq!(windows_to_wsl_path(r"C:\Users\HocSys\AppData\Local\AgentPet\agentpet.exe"),
+                   "/mnt/c/Users/HocSys/AppData/Local/AgentPet/agentpet.exe");
+        assert_eq!(windows_to_wsl_path(r"\\?\D:\A B\x.exe"), "/mnt/d/A B/x.exe");
+    }
+}
+
+// ----- jcode home (shared by limits and the jcode hooks) --------------------
+//
+// jcode usually runs inside WSL, so its home is `\\wsl.localhost\<distro>\<home>`.
+// Finding it needs `wsl.exe`, which boots the WSL VM (vmmem) when it is off. So:
+//   * `jcode_home()` NEVER spawns anything: it answers from a cache (memory,
+//     seeded from a small marker file) and falls back to the native home.
+//   * `probe_jcode_wsl()` is the only place that spawns `wsl.exe`. It has a
+//     timeout and is meant to run only once jcode is known to be in use (the
+//     user enables jcode in Settings > Agents), always off the UI thread. A hung
+//     `wsl.exe` (broken distro, first-run prompt) can therefore never block a
+//     caller of `jcode_home()`.
+// Claude-only users, with or without WSL, never trigger a probe.
+
+use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, Instant};
+
+/// How long `wsl.exe` gets before it is killed. Booting a cold VM takes a few seconds.
+#[cfg_attr(not(windows), allow(dead_code))]
+const WSL_PROBE_TIMEOUT: Duration = Duration::from_secs(8);
+
+/// `%APPDATA%\AgentPet\jcode_wsl_home`: one line, the UNC home of the WSL distro
+/// where jcode lives. Written by a successful probe so later launches know
+/// without spawning `wsl.exe`. Delete the file to forget it.
+fn wsl_marker() -> Option<PathBuf> {
+    dirs::config_dir().map(|d| d.join("AgentPet").join("jcode_wsl_home"))
+}
+
+fn wsl_cache() -> &'static Mutex<Option<PathBuf>> {
+    static C: OnceLock<Mutex<Option<PathBuf>>> = OnceLock::new();
+    C.get_or_init(|| {
+        let saved = wsl_marker()
+            .and_then(|p| std::fs::read_to_string(p).ok())
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .map(PathBuf::from);
+        Mutex::new(saved)
+    })
+}
+
+/// The home directory jcode uses, as a path this process can open, plus whether
+/// it is inside WSL. Cache lookup only (see the block comment above): the WSL
+/// home is known after `probe_jcode_wsl` found one, else the native home.
+pub fn jcode_home() -> Option<(PathBuf, bool)> {
+    if let Some(wsl) = wsl_cache().lock().unwrap_or_else(|e| e.into_inner()).clone() {
+        return Some((wsl, true));
+    }
+    dirs::home_dir().map(|h| (h, false))
+}
+
+/// Looks for jcode in the default WSL distro and remembers the answer (also
+/// forgets a stale one). BLOCKS up to `WSL_PROBE_TIMEOUT` plus a UNC lookup, so
+/// call it from a worker (`spawn_blocking` / a thread), never from the UI thread.
+pub fn probe_jcode_wsl() {
+    #[cfg(windows)]
+    {
+        let found = wsl_default_home().and_then(|(distro, home)| {
+            let unc = PathBuf::from(format!(r"\\wsl.localhost\{}{}", distro, home.replace('/', r"\")));
+            unc.join(".jcode").is_dir().then_some(unc)
+        });
+        *wsl_cache().lock().unwrap_or_else(|e| e.into_inner()) = found.clone();
+        if let Some(m) = wsl_marker() {
+            match found {
+                Some(unc) => {
+                    if let Some(dir) = m.parent() { let _ = std::fs::create_dir_all(dir); }
+                    let _ = std::fs::write(m, unc.to_string_lossy().as_bytes());
+                }
+                None => { let _ = std::fs::remove_file(m); }
+            }
+        }
+    }
+}
+
+/// Runs `cmd` with stdout captured and kills it after `timeout`. `None` on a
+/// spawn error, a timeout, or a non-zero exit. Std only, so it is unit-tested.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn run_with_timeout(mut cmd: std::process::Command, timeout: Duration) -> Option<Vec<u8>> {
+    use std::io::Read;
+    use std::process::Stdio;
+    let mut child = cmd.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null()).spawn().ok()?;
+    let mut stdout = child.stdout.take()?;
+    // Read on a thread so a full pipe can't stall the child while we poll it.
+    let reader = std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        let _ = stdout.read_to_end(&mut buf);
+        buf
+    });
+    let deadline = Instant::now() + timeout;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(st)) => break st,
+            Ok(None) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(40)),
+            // Timed out (or wait failed): kill it. The reader thread ends by
+            // itself once the pipe closes, so it is not joined here.
+            _ => { let _ = child.kill(); let _ = child.wait(); return None; }
+        }
+    };
+    if !status.success() { return None; }
+    reader.join().ok()
+}
+
+/// (distro, $HOME) of the default WSL distro, via `wsl.exe`. None without WSL
+/// or when it does not answer in time.
+#[cfg(windows)]
+fn wsl_default_home() -> Option<(String, String)> {
+    use std::os::windows::process::CommandExt;
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    let mut cmd = std::process::Command::new("wsl.exe");
+    cmd.args(["-e", "sh", "-c", "printf '%s\\n%s' \"$WSL_DISTRO_NAME\" \"$HOME\""])
+        .creation_flags(CREATE_NO_WINDOW);
+    let out = run_with_timeout(cmd, WSL_PROBE_TIMEOUT)?;
+    let text = String::from_utf8_lossy(&out).replace('\r', "");
+    let mut it = text.lines();
+    let distro = it.next()?.trim().to_string();
+    let home = it.next()?.trim().to_string();
+    (!distro.is_empty() && home.starts_with('/')).then_some((distro, home))
+}
+
+#[cfg(test)]
+mod read_config_tests {
+    use super::*;
+
+    #[test]
+    fn missing_file_is_empty_but_other_errors_abort() {
+        let dir = std::env::temp_dir().join(format!("ap-readcfg-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        assert_eq!(read_config(&dir.join("nope.toml")).unwrap(), "");
+        // Non-UTF-8 content must be an error, never silently "empty".
+        let bad = dir.join("bad.toml");
+        std::fs::write(&bad, [0xff, 0xfe, 0x00]).unwrap();
+        assert!(read_config(&bad).is_err());
+        // A directory where a file is expected is not NotFound either.
+        assert!(read_config(&dir).is_err());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+}
+
+/// Hermes Agent (Nous Research) integration. Unlike the other agents Hermes
+/// keeps a YAML config per profile and refuses to run a shell hook that is not
+/// in its per-home consent allowlist, so install covers every home and approves
+/// the hook there too. `config.yaml` is user-owned and comment-heavy, so it is
+/// edited line-wise (same approach as jcode's TOML) and foreign hooks are kept.
+mod hermes {
     use super::is_ours;
-    use std::path::Path;
     use std::sync::atomic::{AtomicU64, Ordering};
+    use serde_json::{json, Value};
+    use std::path::{Path, PathBuf};
+
+    pub const ALLOWLIST: &str = "shell-hooks-allowlist.json";
 
     static TMP_SEQ: AtomicU64 = AtomicU64::new(1);
-
-    pub fn is_hooks_header(line: &str) -> bool {
-        header_compact(line) == "[hooks]"
-    }
-
-    /// Full table/array-table header, including every closing `]`. Truncating at
-    /// the first `]` would turn `[[hooks]]` into `[[hooks]` and miss it.
-    fn header_code(line: &str) -> Option<&str> {
-        let t = strip_cr(line).trim();
-        if !t.starts_with('[') {
-            return None;
-        }
-        let mut depth = 0i32;
-        let mut in_str: Option<char> = None;
-        let mut escape = false;
-        let mut i = 0;
-        while i < t.len() {
-            let ch = t[i..].chars().next()?;
-            let n = ch.len_utf8();
-            if let Some(q) = in_str {
-                if escape {
-                    escape = false;
-                } else if q == '"' && ch == '\\' {
-                    escape = true;
-                } else if ch == q {
-                    in_str = None;
-                }
-                i += n;
-                continue;
-            }
-            match ch {
-                '"' | '\'' => in_str = Some(ch),
-                '[' => depth += 1,
-                ']' => {
-                    if depth == 0 {
-                        return None;
-                    }
-                    depth -= 1;
-                    i += n;
-                    if depth == 0 {
-                        let rest = t[i..].trim_start();
-                        if rest.is_empty() || rest.starts_with('#') {
-                            return Some(&t[..i]);
-                        }
-                        return None;
-                    }
-                    continue;
-                }
-                _ => {}
-            }
-            i += n;
-        }
-        None
-    }
-
-    fn header_compact(line: &str) -> String {
-        header_code(line)
-            .map(|h| h.chars().filter(|c| !c.is_whitespace()).collect())
-            .unwrap_or_default()
-    }
-
-    fn strip_cr(line: &str) -> &str {
-        line.strip_suffix('\r').unwrap_or(line)
-    }
-
-    fn hooks_body(lines: &[String]) -> Option<(usize, usize)> {
-        let header = lines.iter().position(|l| is_hooks_header(l))?;
-        let mut end = header + 1;
-        while end < lines.len() {
-            if strip_cr(&lines[end]).trim().starts_with('[') {
-                break;
-            }
-            end += 1;
-        }
-        Some((header, end))
-    }
-
-    fn split_indent(s: &str) -> (&str, &str) {
-        let i = s.find(|c: char| c != ' ' && c != '\t').unwrap_or(s.len());
-        (&s[..i], &s[i..])
-    }
-
-    fn parse_literal_string(s: &str) -> Option<(String, usize)> {
-        if !s.starts_with('\'') {
-            return None;
-        }
-        let rest = &s[1..];
-        let end = rest.find('\'')?;
-        Some((rest[..end].to_string(), 1 + end + 1))
-    }
-
-    fn parse_basic_string(s: &str) -> Option<(String, usize)> {
-        if !s.starts_with('"') {
-            return None;
-        }
-        let mut chars = s.char_indices();
-        chars.next()?;
-        let mut out = String::new();
-        let mut escape = false;
-        for (idx, ch) in chars {
-            if escape {
-                out.push(match ch {
-                    '\\' => '\\',
-                    '"' => '"',
-                    'n' => '\n',
-                    't' => '\t',
-                    'r' => '\r',
-                    _ => return None,
-                });
-                escape = false;
-                continue;
-            }
-            match ch {
-                '\\' => escape = true,
-                '"' => return Some((out, idx + ch.len_utf8())),
-                '\n' => return None,
-                _ => out.push(ch),
-            }
-        }
-        None
-    }
-
-    fn parse_quoted(s: &str) -> Option<(String, usize)> {
-        if s.starts_with("'''") || s.starts_with("\"\"\"") {
-            return None;
-        }
-        if s.starts_with('\'') {
-            parse_literal_string(s)
-        } else if s.starts_with('"') {
-            parse_basic_string(s)
-        } else {
-            None
-        }
-    }
-
-    fn remainder_comment(rest: &str) -> Option<&str> {
-        let t = rest.trim_start();
-        if t.is_empty() {
-            Some("")
-        } else if t.starts_with('#') {
-            Some(rest)
-        } else {
-            None
-        }
-    }
-
-    enum Hit {
-        Ours { index: usize, comment: String, leading: String },
-        Foreign,
-        Ambiguous,
-        Missing,
-    }
-
-    fn hit_for_event(lines: &[String], header: usize, end: usize, event: &str) -> Hit {
-        let mut found: Option<(usize, String, String)> = None;
-        for i in header + 1..end {
-            match inspect_line(&lines[i], event) {
-                LineHit::Skip => {}
-                LineHit::Ours { comment, leading } => {
-                    if found.is_some() {
-                        return Hit::Ambiguous;
-                    }
-                    found = Some((i, comment, leading));
-                }
-                LineHit::Foreign => return Hit::Foreign,
-                LineHit::Ambiguous => return Hit::Ambiguous,
-            }
-        }
-        match found {
-            Some((index, comment, leading)) => Hit::Ours { index, comment, leading },
-            None => Hit::Missing,
-        }
-    }
-
-    enum LineHit {
-        Skip,
-        Ours { comment: String, leading: String },
-        Foreign,
-        Ambiguous,
-    }
-
-    fn inspect_line(line: &str, event: &str) -> LineHit {
-        let raw = strip_cr(line);
-        let (leading, rest) = split_indent(raw);
-        if rest.is_empty() || rest.starts_with('#') {
-            return LineHit::Skip;
-        }
-        if rest.starts_with('[') {
-            return LineHit::Skip;
-        }
-        let (key, key_quoted, after_key) = match parse_key(rest) {
-            Some(v) => v,
-            None => {
-                return if rest.contains(event) { LineHit::Ambiguous } else { LineHit::Skip };
-            }
-        };
-        if after_key.trim_start().starts_with('.') {
-            return if key == event || key == "hooks" { LineHit::Ambiguous } else { LineHit::Skip };
-        }
-        let after_key = after_key.trim_start();
-        if !after_key.starts_with('=') {
-            return if key == event { LineHit::Ambiguous } else { LineHit::Skip };
-        }
-        if key != event {
-            return LineHit::Skip;
-        }
-        if key_quoted {
-            return LineHit::Ambiguous;
-        }
-        let after_eq = after_key[1..].trim_start();
-        if after_eq.starts_with('[') || after_eq.starts_with('{')
-            || after_eq.starts_with("'''") || after_eq.starts_with("\"\"\"")
-        {
-            return LineHit::Ambiguous;
-        }
-        let Some((value, n)) = parse_quoted(after_eq) else {
-            return LineHit::Ambiguous;
-        };
-        let Some(comment) = remainder_comment(&after_eq[n..]) else {
-            return LineHit::Ambiguous;
-        };
-        if is_ours(&value) {
-            LineHit::Ours { comment: comment.to_string(), leading: leading.to_string() }
-        } else {
-            LineHit::Foreign
-        }
-    }
-
-    fn parse_key(s: &str) -> Option<(String, bool, &str)> {
-        if s.starts_with('\'') || s.starts_with('"') {
-            let (key, n) = parse_quoted(s)?;
-            Some((key, true, &s[n..]))
-        } else {
-            let n = s.find(|c: char| !(c.is_ascii_alphanumeric() || c == '_' || c == '-')).unwrap_or(s.len());
-            if n == 0 {
-                return None;
-            }
-            Some((s[..n].to_string(), false, &s[n..]))
-        }
-    }
-
-    fn inner_is_hooks_name(inner: &str) -> bool {
-        inner == "hooks" || inner == "\"hooks\"" || inner == "'hooks'"
-    }
-
-    fn unsupported_hooks_repr(toml: &str) -> bool {
-        let mut standard = 0usize;
-        for line in toml.split('\n') {
-            if line_is_unsupported_hooks(line) {
-                return true;
-            }
-            if is_hooks_header(line) {
-                standard += 1;
-                if standard > 1 {
-                    return true;
-                }
-            }
-        }
-        false
-    }
-
-    fn line_is_unsupported_hooks(line: &str) -> bool {
-        let compact = header_compact(line);
-        if compact.starts_with("[[") && compact.ends_with("]]") {
-            if inner_is_hooks_name(&compact[2..compact.len() - 2]) {
-                return true;
-            }
-        } else if compact.starts_with('[') && compact.ends_with(']') && compact != "[hooks]" {
-            if inner_is_hooks_name(&compact[1..compact.len() - 1]) {
-                return true;
-            }
-        }
-        let raw = strip_cr(line);
-        let rest = raw.trim_start();
-        if rest.is_empty() || rest.starts_with('#') || rest.starts_with('[') {
-            return false;
-        }
-        let Some((key, _, after_key)) = parse_key(rest) else {
-            return false;
-        };
-        if key != "hooks" {
-            return false;
-        }
-        let after = after_key.trim_start();
-        after.starts_with('.') || after.starts_with('=')
-    }
-
-    fn conflict(path: &str, event: &str) -> String {
-        format!("{path} already sets hooks.{event}; remove it or add AgentPet's command to it manually.")
-    }
-
-    pub fn toml_string(command: &str) -> String {
-        if !command.contains('\'') && !command.contains('\n') {
-            format!("'{command}'")
-        } else {
-            let escaped = command.replace('\\', "\\\\").replace('"', "\\\"").replace('\n', "\\n");
-            format!("\"{escaped}\"")
-        }
-    }
-
-    pub fn is_installed(toml: &str, events: &[&str]) -> bool {
-        if unsupported_hooks_repr(toml) {
-            return false;
-        }
-        let lines: Vec<String> = toml.split('\n').map(|s| s.to_string()).collect();
-        let Some((header, end)) = hooks_body(&lines) else { return false };
-        events.iter().any(|event| matches!(hit_for_event(&lines, header, end, event), Hit::Ours { .. }))
-    }
-
-    pub fn install(toml: &str, command: &str, events: &[&str], path: &str) -> Result<String, String> {
-        if unsupported_hooks_repr(toml) {
-            return Err(format!("{path} has an unsupported hooks representation; refuse to edit it."));
-        }
-        let crlf = toml.contains("\r\n") || toml.contains('\r');
-        let had_trailing_nl = toml.ends_with('\n');
-        let eol = if crlf { "\r" } else { "" };
-        let mut lines: Vec<String> = toml.split('\n').map(|s| s.to_string()).collect();
-        if hooks_body(&lines).is_none() {
-            if lines.last().map(|s| s.is_empty()).unwrap_or(false) {
-                lines.pop();
-            } else if crlf {
-                if let Some(last) = lines.last_mut() {
-                    if !last.ends_with('\r') {
-                        last.push('\r');
-                    }
-                }
-            }
-            if !lines.is_empty() {
-                lines.push(eol.to_string());
-            }
-            lines.push(format!("[hooks]{eol}"));
-            if had_trailing_nl {
-                lines.push(String::new());
-            }
-        }
-        let (header, end) = hooks_body(&lines).expect("hooks table present");
-        let mut ours: Vec<(String, usize, String, String)> = Vec::new();
-        let mut missing: Vec<String> = Vec::new();
-        for event in events {
-            match hit_for_event(&lines, header, end, event) {
-                Hit::Foreign | Hit::Ambiguous => return Err(conflict(path, event)),
-                Hit::Ours { index, comment, leading } => {
-                    ours.push((event.to_string(), index, comment, leading));
-                }
-                Hit::Missing => missing.push((*event).to_string()),
-            }
-        }
-        let value = toml_string(command);
-        for (event, index, comment, leading) in &ours {
-            let line_eol = if lines[*index].ends_with('\r') || crlf { "\r" } else { "" };
-            lines[*index] = format!("{leading}{event} = {value}{comment}{line_eol}");
-        }
-        let new_entries: Vec<String> = missing
-            .into_iter()
-            .map(|event| format!("{event} = {value}{eol}"))
-            .collect();
-        let at = header + 1;
-        lines.splice(at..at, new_entries);
-        Ok(join_preserving_final_newline(lines, had_trailing_nl))
-    }
-
-    fn join_preserving_final_newline(mut lines: Vec<String>, had_trailing_nl: bool) -> String {
-        if !had_trailing_nl {
-            if let Some(last) = lines.last_mut() {
-                if last.ends_with('\r') {
-                    last.pop();
-                }
-            }
-        }
-        lines.join("\n")
-    }
-
-    pub fn uninstall(toml: &str, events: &[&str]) -> String {
-        if unsupported_hooks_repr(toml) {
-            return toml.to_string();
-        }
-        let mut lines: Vec<String> = toml.split('\n').map(|s| s.to_string()).collect();
-        for event in events {
-            let Some((header, end)) = hooks_body(&lines) else { continue };
-            if let Hit::Ours { index, .. } = hit_for_event(&lines, header, end, event) {
-                lines.remove(index);
-            }
-        }
-        lines.join("\n")
-    }
-
-    pub fn read_or_empty(path: &Path) -> std::io::Result<String> {
-        match std::fs::read_to_string(path) {
-            Ok(s) => Ok(s),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(String::new()),
-            Err(e) => Err(e),
-        }
-    }
-
-    pub fn install_to_disk(command: &str, path: &Path, events: &[&str]) -> std::io::Result<()> {
-        let existing = read_or_empty(path)?;
-        let updated = install(&existing, command, events, &path.display().to_string())
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
-        if updated != existing {
-            write_atomic(path, &updated)?;
-        }
-        Ok(())
-    }
-
-    pub fn uninstall_from_disk(path: &Path, events: &[&str]) -> std::io::Result<()> {
-        let existing = read_or_empty(path)?;
-        let updated = uninstall(&existing, events);
-        if updated != existing {
-            write_atomic(path, &updated)?;
-        }
-        Ok(())
-    }
 
     pub fn write_atomic(path: &Path, contents: &str) -> std::io::Result<()> {
         if let Some(dir) = path.parent() {
@@ -999,19 +813,6 @@ mod jcode {
             std::fs::rename(from, to)
         }
     }
-}
-
-/// Hermes Agent (Nous Research) integration. Unlike the other agents Hermes
-/// keeps a YAML config per profile and refuses to run a shell hook that is not
-/// in its per-home consent allowlist, so install covers every home and approves
-/// the hook there too. `config.yaml` is user-owned and comment-heavy, so it is
-/// edited line-wise (same approach as jcode's TOML) and foreign hooks are kept.
-mod hermes {
-    use super::{is_ours, jcode::write_atomic};
-    use serde_json::{json, Value};
-    use std::path::{Path, PathBuf};
-
-    pub const ALLOWLIST: &str = "shell-hooks-allowlist.json";
 
     /// Hermes home: `HERMES_HOME` override, else `%LOCALAPPDATA%\hermes`
     /// (`~/.hermes` on macOS/Linux).
@@ -1447,8 +1248,53 @@ mod hermes {
 }
 
 #[cfg(test)]
+mod timeout_tests {
+    use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn returns_output_of_a_quick_command() {
+        let mut c = std::process::Command::new("sh");
+        c.args(["-c", "printf hi"]);
+        assert_eq!(run_with_timeout(c, Duration::from_secs(5)).as_deref(), Some(&b"hi"[..]));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn kills_a_hung_command() {
+        let mut c = std::process::Command::new("sh");
+        c.args(["-c", "sleep 30"]);
+        let t = Instant::now();
+        assert!(run_with_timeout(c, Duration::from_millis(300)).is_none());
+        assert!(t.elapsed() < Duration::from_secs(5), "must not wait for the child");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn non_zero_exit_is_none() {
+        let mut c = std::process::Command::new("sh");
+        c.args(["-c", "exit 3"]);
+        assert!(run_with_timeout(c, Duration::from_secs(5)).is_none());
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn codex_registers_interrupt_and_session_end_next_to_stop() {
+        let s = spec("codex").expect("codex spec");
+        for event in ["Stop", "Interrupt", "SessionEnd", "SubagentStop"] {
+            assert!(s.events.contains(&event), "codex must register {event}");
+        }
+        let mut seen = std::collections::HashSet::new();
+        assert!(s.events.iter().all(|e| seen.insert(*e)), "no duplicate codex events");
+        for event in s.events {
+            let entry = make_entry(s.style, event, "\"/x/agentpet\" hook --agent codex");
+            assert!(entry_is_ours(s.style, event, &entry), "{event} entry must be recognised for uninstall");
+        }
+    }
 
     #[test]
     fn opencode_plugin_is_v2_shape() {
@@ -1485,250 +1331,6 @@ mod tests {
             &[".config", "opencode", "plugins", "agentpet.js"]
         );
     }
-
-    const JCODE_CMD: &str = "\"/x/agentpet\" hook --agent jcode";
-    const JCODE_EVENTS: &[&str] = &["session_start", "turn_start", "post_tool", "turn_end", "session_end"];
-    const JCODE_SAMPLE: &str = "# user comment\n[display]\ndebug_socket = false\n\n[hooks]\npre_tool_timeout_ms = 5000\n\n[ambient]\nenabled = false\n";
-
-    #[test]
-    fn jcode_spec_uses_observers_only() {
-        let s = spec("jcode").expect("jcode spec");
-        assert!(matches!(s.style, Style::JcodeToml));
-        assert_eq!(s.rel_path, &[".jcode", "config.toml"]);
-        assert!(!s.events.contains(&"pre_tool"), "pre_tool is a blocking gate");
-        assert_eq!(s.events, JCODE_EVENTS);
-    }
-
-    #[test]
-    fn jcode_in_catalog() {
-        let row = catalog().into_iter().find(|a| a.kind == "jcode").expect("jcode");
-        assert_eq!(row.display_name, "jcode");
-        assert_eq!(row.note.as_deref(), Some("jcode lifecycle hooks (~/.jcode/config.toml)"));
-    }
-
-    #[test]
-    fn jcode_install_adds_keys_inside_hooks_table_only() {
-        let out = jcode::install(JCODE_SAMPLE, JCODE_CMD, JCODE_EVENTS, "config.toml").unwrap();
-        let lines: Vec<&str> = out.split('\n').collect();
-        let hooks = lines.iter().position(|l| *l == "[hooks]").unwrap();
-        let ambient = lines.iter().position(|l| *l == "[ambient]").unwrap();
-        for event in JCODE_EVENTS {
-            let entry = format!("{event} = '{JCODE_CMD}'");
-            let i = lines.iter().position(|l| *l == entry.as_str()).expect(event);
-            assert!(i > hooks && i < ambient, "{event} must sit in [hooks]");
-        }
-        assert_eq!(jcode::uninstall(&out, JCODE_EVENTS), JCODE_SAMPLE);
-        assert!(jcode::is_installed(&out, JCODE_EVENTS));
-        assert!(!jcode::is_installed(JCODE_SAMPLE, JCODE_EVENTS));
-    }
-
-    #[test]
-    fn jcode_install_is_idempotent() {
-        let once = jcode::install(JCODE_SAMPLE, JCODE_CMD, JCODE_EVENTS, "config.toml").unwrap();
-        assert_eq!(jcode::install(&once, JCODE_CMD, JCODE_EVENTS, "config.toml").unwrap(), once);
-        let moved = jcode::install(&once, "\"/y/agentpet\" hook --agent jcode", JCODE_EVENTS, "config.toml").unwrap();
-        assert_eq!(moved.split('\n').count(), once.split('\n').count());
-        assert!(moved.contains("/y/agentpet") && !moved.contains("/x/agentpet"));
-    }
-
-    #[test]
-    fn jcode_install_creates_hooks_table_when_missing() {
-        let out = jcode::install("[display]\nx = 1\n", JCODE_CMD, &["turn_end"], "config.toml").unwrap();
-        assert!(out.starts_with("[display]\nx = 1\n\n[hooks]\nturn_end = '"));
-        assert!(jcode::install("", JCODE_CMD, &["turn_end"], "config.toml").unwrap().starts_with("[hooks]\n"));
-    }
-
-    #[test]
-    fn jcode_header_variants_are_found_not_duplicated() {
-        for header in ["[hooks] # observers", "[ hooks ]", "\t[hooks]\t", "[hooks]\r"] {
-            let src = format!("{header}\npre_tool = \"x\"\n");
-            let out = jcode::install(&src, JCODE_CMD, &["turn_end"], "config.toml").unwrap();
-            let headers: Vec<&str> = out.split('\n').filter(|l| jcode::is_hooks_header(l)).collect();
-            assert_eq!(headers.len(), 1, "header {header:?}");
-            assert!(jcode::is_installed(&out, &["turn_end"]));
-            assert_eq!(jcode::uninstall(&out, &["turn_end"]), src);
-        }
-        assert!(!jcode::is_hooks_header("[[hooks]]"));
-        assert!(!jcode::is_hooks_header("# [hooks]"));
-        assert!(!jcode::is_hooks_header("[hooks.extra]"));
-    }
-
-    #[test]
-    fn jcode_foreign_hook_is_never_overwritten() {
-        let foreign = JCODE_SAMPLE.replace(
-            "pre_tool_timeout_ms = 5000",
-            "pre_tool_timeout_ms = 5000\nturn_end = \"~/bin/notify\"",
-        );
-        let err = jcode::install(&foreign, JCODE_CMD, JCODE_EVENTS, "config.toml").unwrap_err();
-        assert!(err.contains("already sets hooks.turn_end"));
-        assert_eq!(jcode::uninstall(&foreign, JCODE_EVENTS), foreign);
-    }
-
-    #[test]
-    fn jcode_array_hook_is_never_overwritten() {
-        let src = "[hooks]\nturn_end = [\"~/bin/notify\"]\n";
-        let err = jcode::install(src, JCODE_CMD, &["turn_end"], "config.toml").unwrap_err();
-        assert!(err.contains("already sets hooks.turn_end"));
-        assert_eq!(jcode::uninstall(src, &["turn_end"]), src);
-        assert!(!jcode::is_installed(src, &["turn_end"]));
-    }
-
-    #[test]
-    fn jcode_commented_keys_and_similar_names_are_ignored() {
-        let toml = "[hooks]\n# turn_end = \"old\"\nturn_end_extra = 1\n";
-        let out = jcode::install(toml, JCODE_CMD, &["turn_end"], "config.toml").unwrap();
-        assert!(out.contains("# turn_end = \"old\"\nturn_end_extra = 1"));
-        assert!(out.contains(&format!("turn_end = '{JCODE_CMD}'")));
-    }
-
-    #[test]
-    fn jcode_command_quoting() {
-        assert_eq!(
-            jcode::toml_string(r#""/a b's/agentpet" hook"#),
-            r#""\"/a b's/agentpet\" hook""#
-        );
-        assert_eq!(
-            jcode::toml_string(r#""/x/agentpet" hook"#),
-            r#"'"/x/agentpet" hook'"#
-        );
-        let win = r#""C:\Users\me\agentpet.exe" hook --agent jcode"#;
-        assert_eq!(jcode::toml_string(win), format!("'{win}'"));
-        let apo = r#""C:\Users\O'Brien\agentpet.exe" hook"#;
-        assert_eq!(
-            jcode::toml_string(apo),
-            r#""\"C:\\Users\\O'Brien\\agentpet.exe\" hook""#
-        );
-    }
-
-    #[test]
-    fn jcode_disk_roundtrip() {
-        let dir = std::env::temp_dir().join(format!("agentpet-jcode-test-{}", std::process::id()));
-        let path = dir.join("config.toml");
-        std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(&path, JCODE_SAMPLE).unwrap();
-        let installed = jcode::install(JCODE_SAMPLE, JCODE_CMD, JCODE_EVENTS, &path.display().to_string()).unwrap();
-        jcode::write_atomic(&path, &installed).unwrap();
-        assert!(jcode::is_installed(&std::fs::read_to_string(&path).unwrap(), JCODE_EVENTS));
-        let removed = jcode::uninstall(&std::fs::read_to_string(&path).unwrap(), JCODE_EVENTS);
-        jcode::write_atomic(&path, &removed).unwrap();
-        assert_eq!(std::fs::read_to_string(&path).unwrap(), JCODE_SAMPLE);
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn jcode_foreign_command_with_agentpet_hook_comment_is_not_ours() {
-        let src = "[hooks]\nturn_end = 'notify' # agentpet hook\n";
-        let err = jcode::install(src, JCODE_CMD, &["turn_end"], "config.toml").unwrap_err();
-        assert!(err.contains("already sets hooks.turn_end"));
-        assert_eq!(jcode::uninstall(src, &["turn_end"]), src);
-        assert!(!jcode::is_installed(src, &["turn_end"]));
-    }
-
-    #[test]
-    fn jcode_invalid_utf8_is_not_overwritten() {
-        let dir = std::env::temp_dir().join(format!(
-            "agentpet-jcode-utf8-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_nanos())
-                .unwrap_or(0)
-        ));
-        let path = dir.join("config.toml");
-        std::fs::create_dir_all(&dir).unwrap();
-        let bytes = b"\xff\xfe[hooks]\nturn_end = 'x'\n";
-        std::fs::write(&path, bytes).unwrap();
-        assert!(jcode::install_to_disk(JCODE_CMD, &path, JCODE_EVENTS).is_err());
-        assert_eq!(std::fs::read(&path).unwrap(), bytes);
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn jcode_windows_apostrophe_path_installs() {
-        let cmd = r#""C:\Users\O'Brien\agentpet.exe" hook --agent jcode"#;
-        let out = jcode::install("[hooks]\n", cmd, &["turn_end"], "config.toml").unwrap();
-        assert!(out.contains(r#""\"C:\\Users\\O'Brien\\agentpet.exe\" hook --agent jcode""#));
-        assert!(jcode::is_installed(&out, &["turn_end"]));
-    }
-
-    #[test]
-    fn jcode_quoted_key_is_conflict() {
-        let src = "[hooks]\n\"turn_end\" = \"~/bin/notify\"\n";
-        let err = jcode::install(src, JCODE_CMD, &["turn_end"], "config.toml").unwrap_err();
-        assert!(err.contains("turn_end"));
-        assert_eq!(jcode::uninstall(src, &["turn_end"]), src);
-        assert!(!jcode::is_installed(src, &["turn_end"]));
-    }
-
-    #[test]
-    fn jcode_crlf_no_final_newline_missing_header() {
-        let src = "[display]\r\nx = 1";
-        let out = jcode::install(src, JCODE_CMD, &["turn_end"], "config.toml").unwrap();
-        assert!(out.contains("[display]\r\nx = 1\r\n\r\n[hooks]\r\n"), "{out:?}");
-        assert!(out.contains("turn_end = "));
-        assert!(!out.ends_with('\n'), "{out:?}");
-        assert!(!out.ends_with('\r'), "{out:?}");
-    }
-
-    #[test]
-    fn jcode_crlf_existing_hooks_no_final_newline_no_trailing_cr() {
-        let src = "[hooks]\r\npre_tool_timeout_ms = 5000";
-        let out = jcode::install(src, JCODE_CMD, &["turn_end"], "config.toml").unwrap();
-        assert!(out.contains("[hooks]\r\n"), "{out:?}");
-        assert!(out.contains("pre_tool_timeout_ms = 5000"), "{out:?}");
-        assert!(out.contains("turn_end = "));
-        assert!(!out.ends_with('\n'), "{out:?}");
-        assert!(!out.ends_with('\r'), "{out:?}");
-        let last_ours = "[hooks]\r\nturn_end = '\"/x/agentpet\" hook --agent jcode'";
-        let moved = jcode::install(last_ours, "\"/y/agentpet\" hook --agent jcode", &["turn_end"], "config.toml").unwrap();
-        assert!(!moved.ends_with('\r'), "{moved:?}");
-        assert!(!moved.ends_with('\n'), "{moved:?}");
-        assert!(moved.contains("/y/agentpet"));
-    }
-
-    #[test]
-    fn jcode_own_comment_suffix_is_preserved() {
-        let src = "[hooks]\nturn_end = '\"/x/agentpet\" hook --agent jcode' # keep\n";
-        let out = jcode::install(src, "\"/y/agentpet\" hook --agent jcode", &["turn_end"], "config.toml").unwrap();
-        assert!(out.contains("# keep"), "{out:?}");
-        assert!(out.contains("/y/agentpet"));
-        assert!(!out.contains("/x/agentpet"));
-    }
-
-    #[test]
-    fn jcode_array_and_quoted_hooks_headers_are_rejected() {
-        let cmd = JCODE_CMD;
-        for src in [
-            "[[hooks]]\npre_tool = \"x\"\n",
-            "[[ hooks ]]\npre_tool = \"x\"\n",
-            "[ [hooks] ]\npre_tool = \"x\"\n",
-            "\t[[hooks]]\t\npre_tool = \"x\"\n",
-            "[\"hooks\"]\npre_tool = \"x\"\n",
-            "['hooks']\npre_tool = \"x\"\n",
-            "[ \"hooks\" ]\npre_tool = \"x\"\n",
-            "[['hooks']]\npre_tool = \"x\"\n",
-        ] {
-            let err = jcode::install(src, cmd, &["turn_end"], "config.toml").unwrap_err();
-            assert!(err.contains("unsupported hooks representation"), "{src:?} {err}");
-            assert_eq!(jcode::uninstall(src, &["turn_end"]), src);
-            assert!(!jcode::is_installed(src, &["turn_end"]));
-            assert!(!src.contains("[hooks]\n[") && jcode::install(src, cmd, &["turn_end"], "config.toml").is_err());
-        }
-        assert!(!jcode::is_hooks_header("[[hooks]]"));
-        assert!(!jcode::is_hooks_header("[ [hooks] ]"));
-        assert!(!jcode::is_hooks_header("[\"hooks\"]"));
-    }
-
-    #[test]
-    fn jcode_duplicate_hooks_tables_are_rejected() {
-        let src = "[hooks]\nx = 1\n\n[hooks]\ny = 2\n";
-        let err = jcode::install(src, JCODE_CMD, &["turn_end"], "config.toml").unwrap_err();
-        assert!(err.contains("unsupported hooks representation"), "{err}");
-        assert_eq!(jcode::uninstall(src, &["turn_end"]), src);
-        assert!(!jcode::is_installed(src, &["turn_end"]));
-    }
-
-    // ----- Hermes Agent ---------------------------------------------------
 
     const HERMES_CMD: &str = "\"C:\\Users\\me\\AppData\\Local\\Programs\\AgentPet\\agentpet.exe\" hook --agent hermes";
     const HERMES_EVENTS: &[&str] = &[

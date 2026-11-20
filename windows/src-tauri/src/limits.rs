@@ -1,155 +1,204 @@
-//! Claude and Codex subscription usage limits (session and weekly windows).
+//! Subscription limits read straight from the provider, a port of the macOS
+//! `NativeUsageProbe` (Claude half) + `JcodeClaudeAuth`.
 //!
-//! Credential sources read (read-only, never written, refreshed, copied or cached):
-//! - `~/.claude/.credentials.json` (`claudeAiOauth.accessToken`, `claudeAiOauth.expiresAt`)
-//! - `~/.codex/auth.json`, else `~/.config/codex/auth.json`
-//!   (`tokens.access_token`, optional `tokens.account_id`)
+//! Token sources, best first: Claude Code's `~/.claude/.credentials.json`, then
+//! jcode's active Claude account in `~/.jcode/auth.json` (reached over
+//! `\\wsl.localhost` when jcode runs in WSL). Read-only: only the short-lived
+//! access token is used, never the refresh token, nothing is written back, and
+//! the token stays in Rust (the webview only sees percentages and reset times).
 //!
-//! Each token is only sent over HTTPS to its fixed provider usage endpoint
-//! (api.anthropic.com, chatgpt.com). Probes are independent and run concurrently;
-//! every failure silently omits only that provider.
+//! Codex (`~/.codex/auth.json` or `~/.config/codex/auth.json`) is probed the same way
+//! against its fixed provider endpoint; each probe fails closed and silently.
 
 use serde::Serialize;
 use serde_json::Value;
-use std::io::Read;
 use std::path::PathBuf;
 use std::time::Duration;
 
 const USAGE_URL: &str = "https://api.anthropic.com/api/oauth/usage";
-const CODEX_USAGE_URL: &str = "https://chatgpt.com/backend-api/wham/usage";
-const MAX_CRED_BYTES: u64 = 1024 * 1024;
-const MAX_BODY_BYTES: usize = 64 * 1024;
 
-#[derive(Debug, Clone, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct LimitWindow {
+    /// "Session" / "Weekly" (translated in the webview).
     pub label: String,
-    pub used_pct: f64,
-    pub resets_at_ms: Option<i64>,
+    /// 0..1 of the budget still left.
+    pub fraction_left: f64,
+    /// The provider's reset timestamp, passed through for `Date.parse`.
+    pub resets_at: Option<String>,
+    /// Window length in seconds (5h / 7d), for the "5h" / "7d" short label.
+    pub period: f64,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ProviderLimit {
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct LimitProvider {
     pub id: String,
-    pub name: String,
+    pub display_name: String,
     pub windows: Vec<LimitWindow>,
 }
 
-fn epoch_to_ms(n: f64) -> i64 {
-    if n > 1e11 {
-        n as i64
-    } else {
-        (n * 1000.0) as i64
-    }
+/// True only when `expiry` is a number (epoch seconds or milliseconds) in the
+/// past. A missing/unknown expiry is not treated as expired: the API call is
+/// the real check (mirrors `OAuthExpiry.isExpired`).
+pub fn is_expired(expiry: Option<&Value>, now_secs: f64) -> bool {
+    let Some(raw) = expiry.and_then(Value::as_f64) else { return false };
+    // Heuristic: epoch-ms values are > 1e11 (1973+ in ms, year 5138 in s).
+    let secs = if raw > 1e11 { raw / 1000.0 } else { raw };
+    secs <= now_secs
 }
 
-pub fn parse_claude_credentials(text: &str, now_ms: i64) -> Option<String> {
-    let v: Value = serde_json::from_str(text).ok()?;
-    let oauth = v.get("claudeAiOauth")?;
-    let token = oauth.get("accessToken")?.as_str()?;
-    if token.is_empty() {
+/// jcode `auth.json`: `{"anthropic_accounts": [{"label", "access", "expires"
+/// (epoch ms), ...}], "active_anthropic_account": "<label>"}`. The active
+/// account's token, else the first account's; None if missing/expired.
+pub fn jcode_access_token(data: &[u8], now_secs: f64) -> Option<String> {
+    let json: Value = serde_json::from_slice(data).ok()?;
+    let accounts = json.get("anthropic_accounts")?.as_array()?;
+    let first = accounts.first()?;
+    let active = json.get("active_anthropic_account").and_then(Value::as_str);
+    let account = accounts
+        .iter()
+        .find(|a| active.is_some() && a.get("label").and_then(Value::as_str) == active)
+        .unwrap_or(first);
+    let token = account.get("access")?.as_str()?;
+    if token.is_empty() || is_expired(account.get("expires"), now_secs) {
         return None;
-    }
-    if let Some(exp) = oauth.get("expiresAt").and_then(Value::as_f64) {
-        if epoch_to_ms(exp) <= now_ms {
-            return None;
-        }
     }
     Some(token.to_string())
 }
 
-fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
-    let y = if m <= 2 { y - 1 } else { y };
-    let era = y.div_euclid(400);
-    let yoe = y - era * 400;
-    let mp = (m + 9) % 12;
-    let doy = (153 * mp + 2) / 5 + d - 1;
-    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
-    era * 146097 + doe - 719468
+/// Claude Code `.credentials.json`: `{"claudeAiOauth": {"accessToken",
+/// "expiresAt"}}`.
+pub fn claude_code_access_token(data: &[u8], now_secs: f64) -> Option<String> {
+    let json: Value = serde_json::from_slice(data).ok()?;
+    let oauth = json.get("claudeAiOauth")?;
+    let token = oauth.get("accessToken")?.as_str()?;
+    if token.is_empty() || is_expired(oauth.get("expiresAt"), now_secs) {
+        return None;
+    }
+    Some(token.to_string())
 }
 
-fn parse_rfc3339_ms(s: &str) -> Option<i64> {
-    let b = s.as_bytes();
-    if b.len() < 20 || !s.is_ascii() {
-        return None;
+/// Parses an `/api/oauth/usage` body. Windows are `{"utilization": <percent
+/// used>, "resets_at": ...}`.
+pub fn claude_provider(json: &Value) -> Option<LimitProvider> {
+    let mut windows = Vec::new();
+    for (key, label, period) in [("five_hour", "Session", 18_000.0), ("seven_day", "Weekly", 604_800.0)] {
+        let Some(w) = json.get(key) else { continue };
+        let Some(used) = w.get("utilization").and_then(Value::as_f64) else { continue };
+        let resets_at = match w.get("resets_at") {
+            Some(Value::String(s)) => Some(s.clone()),
+            Some(Value::Number(n)) => Some(n.to_string()),
+            _ => None,
+        };
+        windows.push(LimitWindow {
+            label: label.into(),
+            fraction_left: ((100.0 - used) / 100.0).clamp(0.0, 1.0),
+            resets_at,
+            period,
+        });
     }
-    let num = |a: usize, z: usize| s.get(a..z)?.parse::<i64>().ok();
-    if b[4] != b'-' || b[7] != b'-' || !(b[10] == b'T' || b[10] == b't' || b[10] == b' ')
-        || b[13] != b':' || b[16] != b':'
-    {
-        return None;
-    }
-    let (y, mo, d) = (num(0, 4)?, num(5, 7)?, num(8, 10)?);
-    let (h, mi, sec) = (num(11, 13)?, num(14, 16)?, num(17, 19)?);
-    if !(1..=12).contains(&mo) || !(1..=31).contains(&d) || h > 23 || mi > 59 || sec > 60 {
-        return None;
-    }
-    let mut i = 19;
-    let mut frac_ms = 0i64;
-    if b[i] == b'.' {
-        let start = i + 1;
-        i = start;
-        while i < b.len() && b[i].is_ascii_digit() {
-            i += 1;
-        }
-        if i == start {
-            return None;
-        }
-        let digits: String = s[start..i].chars().chain("000".chars()).take(3).collect();
-        frac_ms = digits.parse().ok()?;
-    }
-    let offset_s = match b.get(i)? {
-        b'Z' | b'z' if i + 1 == b.len() => 0,
-        sign @ (b'+' | b'-') if i + 6 == b.len() && b[i + 3] == b':' => {
-            let oh = num(i + 1, i + 3)?;
-            let om = num(i + 4, i + 6)?;
-            let t = oh * 3600 + om * 60;
-            if *sign == b'+' {
-                t
-            } else {
-                -t
-            }
-        }
-        _ => return None,
-    };
-    let days = days_from_civil(y, mo, d);
-    Some(((days * 86400 + h * 3600 + mi * 60 + sec - offset_s) * 1000) + frac_ms)
-}
-
-fn parse_window(v: &Value, label: &str) -> Option<LimitWindow> {
-    let obj = v.as_object()?;
-    let used = obj.get("utilization")?.as_f64()?;
-    if !used.is_finite() {
-        return None;
-    }
-    let resets_at_ms = match obj.get("resets_at") {
-        Some(Value::Number(n)) => n.as_f64().map(epoch_to_ms),
-        Some(Value::String(s)) => parse_rfc3339_ms(s),
-        _ => None,
-    };
-    Some(LimitWindow {
-        label: label.to_string(),
-        used_pct: used.clamp(0.0, 100.0),
-        resets_at_ms,
-    })
-}
-
-pub fn parse_claude_usage(body: &[u8]) -> Option<ProviderLimit> {
-    let v: Value = serde_json::from_slice(body).ok()?;
-    let windows: Vec<LimitWindow> = [("five_hour", "session"), ("seven_day", "weekly")]
-        .iter()
-        .filter_map(|(key, label)| parse_window(v.get(*key)?, label))
-        .collect();
     if windows.is_empty() {
         return None;
     }
-    Some(ProviderLimit {
-        id: "claude".to_string(),
-        name: "Claude".to_string(),
-        windows,
-    })
+    Some(LimitProvider { id: "claude".into(), display_name: "Claude".into(), windows })
 }
+
+/// Unexpired candidate tokens from the given files, deduped, in order. Each
+/// file is tried with both shapes, so the caller just lists paths.
+pub fn candidate_tokens(paths: &[PathBuf], now_secs: f64) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for p in paths {
+        let Ok(data) = std::fs::read(p) else { continue };
+        let token = claude_code_access_token(&data, now_secs).or_else(|| jcode_access_token(&data, now_secs));
+        if let Some(t) = token {
+            if !out.contains(&t) {
+                out.push(t);
+            }
+        }
+    }
+    out
+}
+
+/// Claude Code (native home) and jcode (`hooks::jcode_home`: the WSL home only
+/// once jcode was found there, see the note in hooks.rs; never spawns wsl.exe).
+pub fn default_paths() -> Vec<PathBuf> {
+    let mut paths = Vec::new();
+    if let Some(home) = dirs::home_dir() {
+        paths.push(home.join(".claude").join(".credentials.json"));
+    }
+    if let Some((home, _)) = crate::hooks::jcode_home() {
+        paths.push(home.join(".claude").join(".credentials.json"));
+        paths.push(home.join(".jcode").join("auth.json"));
+    }
+    paths
+}
+
+fn now_secs() -> f64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs_f64())
+        .unwrap_or(0.0)
+}
+
+/// Tries every unexpired token in order (each source is refreshed only by its
+/// own CLI, so one can be stale while another is live). None when no token
+/// works or the network is down; the UI then just shows nothing.
+pub async fn probe_claude(paths: Vec<PathBuf>) -> Option<LimitProvider> {
+    // Blocking file reads (a `\\wsl.localhost` UNC read can stall) must not run
+    // on the async executor: move them to the blocking pool.
+    let tokens = tauri::async_runtime::spawn_blocking(move || candidate_tokens(&paths, now_secs()))
+        .await
+        .ok()?;
+    if tokens.is_empty() {
+        return None;
+    }
+    // The updater installs the same provider lazily; whoever runs first wins.
+    if rustls::crypto::CryptoProvider::get_default().is_none() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+    }
+    let client = reqwest::Client::builder().timeout(Duration::from_secs(8)).build().ok()?;
+    for token in tokens {
+        if let Some(p) = probe_with(&client, &token).await {
+            return Some(p);
+        }
+    }
+    None
+}
+
+async fn probe_with(client: &reqwest::Client, token: &str) -> Option<LimitProvider> {
+    for attempt in 0..2 {
+        let res = client
+            .get(USAGE_URL)
+            .bearer_auth(token)
+            .header("Accept", "application/json")
+            .header("Content-Type", "application/json")
+            .header("anthropic-beta", "oauth-2025-04-20")
+            .header("User-Agent", "claude-code/2.1.69")
+            .send()
+            .await;
+        let retry = match res {
+            Ok(r) if r.status().is_success() => {
+                let body = r.bytes().await.ok()?;
+                let json: Value = serde_json::from_slice(&body).ok()?;
+                return claude_provider(&json);
+            }
+            Ok(r) => r.status().is_server_error(),
+            Err(_) => true,
+        };
+        if !retry || attempt == 1 {
+            return None;
+        }
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
+    None
+}
+
+// ----- Codex (`~/.codex/auth.json` -> chatgpt.com wham/usage) ---------------
+
+const CODEX_USAGE_URL: &str = "https://chatgpt.com/backend-api/wham/usage";
+const MAX_CRED_BYTES: u64 = 1024 * 1024;
+const MAX_BODY_BYTES: usize = 64 * 1024;
+/// 2100-01-01: a reset further out than this is a bogus value, not a date.
+const MAX_RESET_SECS: f64 = 4_102_444_800.0;
 
 /// Never Debug/Serialize: the token and account id must not be printable.
 pub struct CodexCreds {
@@ -157,6 +206,7 @@ pub struct CodexCreds {
     account_id: Option<String>,
 }
 
+/// Codex `auth.json`: `{"tokens": {"access_token", "account_id"?}}`.
 pub fn parse_codex_auth(text: &str) -> Option<CodexCreds> {
     let v: Value = serde_json::from_str(text).ok()?;
     let tokens = v.get("tokens")?;
@@ -169,10 +219,15 @@ pub fn parse_codex_auth(text: &str) -> Option<CodexCreds> {
         .and_then(Value::as_str)
         .filter(|s| !s.is_empty())
         .map(str::to_string);
-    Some(CodexCreds {
-        token: token.to_string(),
-        account_id,
-    })
+    Some(CodexCreds { token: token.to_string(), account_id })
+}
+
+fn epoch_to_secs(n: f64) -> f64 {
+    if n > 1e11 {
+        n / 1000.0
+    } else {
+        n
+    }
 }
 
 fn codex_window(
@@ -180,7 +235,8 @@ fn codex_window(
     header: &str,
     body: Option<&Value>,
     label: &str,
-    now_ms: i64,
+    period: f64,
+    now_secs: f64,
 ) -> Option<LimitWindow> {
     let from_header = headers
         .iter()
@@ -189,55 +245,47 @@ fn codex_window(
     let used = from_header
         .or_else(|| body?.get("used_percent")?.as_f64())
         .filter(|u| u.is_finite())?;
-    let secs = body.and_then(|w| {
+    let relative = body.and_then(|w| {
         ["reset_after_seconds", "resets_in_seconds"]
             .iter()
             .find_map(|k| w.get(*k)?.as_f64())
     });
-    let resets_at_ms = body
+    let reset = body
         .and_then(|w| w.get("reset_at")?.as_f64())
-        .map(epoch_to_ms)
-        .or_else(|| {
-            secs.filter(|s| s.is_finite() && *s >= 0.0)
-                .map(|s| now_ms.saturating_add((s * 1000.0) as i64))
-        });
+        .map(epoch_to_secs)
+        .or_else(|| relative.filter(|s| s.is_finite() && *s >= 0.0).map(|s| now_secs + s))
+        .filter(|s| s.is_finite())
+        .map(|s| s.min(MAX_RESET_SECS));
     Some(LimitWindow {
         label: label.to_string(),
-        used_pct: used.clamp(0.0, 100.0),
-        resets_at_ms,
+        fraction_left: ((100.0 - used) / 100.0).clamp(0.0, 1.0),
+        resets_at: reset.map(|s| (s as i64).to_string()),
+        period,
     })
 }
 
-pub fn parse_codex_usage(headers: &[(&str, &str)], body: &[u8], now_ms: i64) -> Option<ProviderLimit> {
+/// Parses a `wham/usage` answer: the `x-codex-*-used-percent` headers win over
+/// the JSON body, which also supplies the reset times.
+pub fn parse_codex_usage(headers: &[(&str, &str)], body: &[u8], now_secs: f64) -> Option<LimitProvider> {
     let v: Option<Value> = serde_json::from_slice(body).ok();
     let rate = v.as_ref().and_then(|v| v.get("rate_limit"));
     let windows: Vec<LimitWindow> = [
-        ("x-codex-primary-used-percent", "primary_window", "session"),
-        ("x-codex-secondary-used-percent", "secondary_window", "weekly"),
+        ("x-codex-primary-used-percent", "primary_window", "Session", 18_000.0),
+        ("x-codex-secondary-used-percent", "secondary_window", "Weekly", 604_800.0),
     ]
     .iter()
-    .filter_map(|(h, key, label)| codex_window(headers, h, rate.and_then(|r| r.get(*key)), label, now_ms))
+    .filter_map(|(h, key, label, period)| {
+        codex_window(headers, h, rate.and_then(|r| r.get(*key)), label, *period, now_secs)
+    })
     .collect();
     if windows.is_empty() {
         return None;
     }
-    Some(ProviderLimit {
-        id: "codex".to_string(),
-        name: "Codex".to_string(),
-        windows,
-    })
-}
-
-fn now_ms() -> Option<i64> {
-    Some(
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .ok()?
-            .as_millis() as i64,
-    )
+    Some(LimitProvider { id: "codex".into(), display_name: "Codex".into(), windows })
 }
 
 fn read_capped(path: PathBuf) -> Option<String> {
+    use std::io::Read;
     let file = std::fs::File::open(path).ok()?;
     if file.metadata().ok()?.len() > MAX_CRED_BYTES {
         return None;
@@ -245,11 +293,6 @@ fn read_capped(path: PathBuf) -> Option<String> {
     let mut text = String::new();
     file.take(MAX_CRED_BYTES).read_to_string(&mut text).ok()?;
     Some(text)
-}
-
-fn read_claude_token() -> Option<String> {
-    let text = read_capped(dirs::home_dir()?.join(".claude").join(".credentials.json"))?;
-    parse_claude_credentials(&text, now_ms()?)
 }
 
 fn read_codex_creds() -> Option<CodexCreds> {
@@ -261,12 +304,9 @@ fn read_codex_creds() -> Option<CodexCreds> {
 
 type Fetched = (Vec<(String, String)>, Vec<u8>);
 
-async fn fetch_once(req: reqwest::RequestBuilder) -> Option<Option<Fetched>> {
-    // Outer None: retryable failure. Some(None): final failure. Some(Some(r)): response.
-    let mut resp = match req.send().await {
-        Ok(r) => r,
-        Err(_) => return None,
-    };
+/// Outer None: retryable failure. Some(None): final failure. Some(Some(r)): response.
+async fn fetch_codex_once(req: reqwest::RequestBuilder) -> Option<Option<Fetched>> {
+    let mut resp = req.send().await.ok()?;
     let status = resp.status();
     if status.is_server_error() {
         return None;
@@ -297,184 +337,173 @@ async fn fetch_once(req: reqwest::RequestBuilder) -> Option<Option<Fetched>> {
     Some(Some((headers, buf)))
 }
 
-fn build_client() -> Option<reqwest::Client> {
+fn codex_request(client: &reqwest::Client, creds: &CodexCreds) -> reqwest::RequestBuilder {
+    let mut r = client
+        .get(CODEX_USAGE_URL)
+        .bearer_auth(&creds.token)
+        .header("Accept", "application/json");
+    if let Some(id) = &creds.account_id {
+        r = match reqwest::header::HeaderValue::from_str(id) {
+            Ok(mut v) => {
+                v.set_sensitive(true);
+                r.header("ChatGPT-Account-Id", v)
+            }
+            Err(_) => r,
+        };
+    }
+    r
+}
+
+/// Codex probe: the token is only ever sent over HTTPS to its fixed endpoint
+/// (no redirects), and any failure silently omits the provider.
+pub async fn probe_codex() -> Option<LimitProvider> {
+    let creds = tauri::async_runtime::spawn_blocking(read_codex_creds).await.ok()??;
     if rustls::crypto::CryptoProvider::get_default().is_none() {
         let _ = rustls::crypto::ring::default_provider().install_default();
     }
-    reqwest::Client::builder()
+    let client = reqwest::Client::builder()
         .connect_timeout(Duration::from_secs(5))
         .timeout(Duration::from_secs(8))
         .redirect(reqwest::redirect::Policy::none())
         .https_only(true)
         .user_agent(concat!("AgentPet/", env!("CARGO_PKG_VERSION")))
         .build()
-        .ok()
-}
-
-async fn fetch_with_retry(
-    client: &reqwest::Client,
-    build: impl Fn(&reqwest::Client) -> reqwest::RequestBuilder,
-) -> Option<Fetched> {
-    let mut result = fetch_once(build(client)).await;
-    if result.is_none() {
-        let _ = tauri::async_runtime::spawn_blocking(|| {
-            std::thread::sleep(Duration::from_secs(1))
-        })
-        .await;
-        result = fetch_once(build(client)).await;
+        .ok()?;
+    let mut fetched = fetch_codex_once(codex_request(&client, &creds)).await;
+    if fetched.is_none() {
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        fetched = fetch_codex_once(codex_request(&client, &creds)).await;
     }
-    result?
-}
-
-async fn fetch_claude(token: &str) -> Option<ProviderLimit> {
-    let client = build_client()?;
-    let (_, body) = fetch_with_retry(&client, |c| {
-        c.get(USAGE_URL)
-            .bearer_auth(token)
-            .header("anthropic-beta", "oauth-2025-04-20")
-            .header("Accept", "application/json")
-            .header("Content-Type", "application/json")
-    })
-    .await?;
-    parse_claude_usage(&body)
-}
-
-async fn fetch_codex(creds: &CodexCreds) -> Option<ProviderLimit> {
-    let client = build_client()?;
-    let (headers, body) = fetch_with_retry(&client, |c| {
-        let mut r = c
-            .get(CODEX_USAGE_URL)
-            .bearer_auth(&creds.token)
-            .header("Accept", "application/json");
-        if let Some(id) = &creds.account_id {
-            r = match reqwest::header::HeaderValue::from_str(id) {
-                Ok(mut v) => {
-                    v.set_sensitive(true);
-                    r.header("ChatGPT-Account-Id", v)
-                }
-                Err(_) => r.header("ChatGPT-Account-Id", id),
-            };
-        }
-        r
-    })
-    .await?;
+    let (headers, body) = fetched??;
     let pairs: Vec<(&str, &str)> = headers.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
-    parse_codex_usage(&pairs, &body, now_ms()?)
+    parse_codex_usage(&pairs, &body, now_secs())
 }
 
-async fn claude_probe() -> Option<ProviderLimit> {
-    let token = tauri::async_runtime::spawn_blocking(read_claude_token).await.ok()??;
-    fetch_claude(&token).await
-}
-
-async fn codex_probe() -> Option<ProviderLimit> {
-    let creds = tauri::async_runtime::spawn_blocking(read_codex_creds).await.ok()??;
-    fetch_codex(&creds).await
-}
-
-#[tauri::command]
-pub async fn usage_limits() -> Vec<ProviderLimit> {
-    let codex = tauri::async_runtime::spawn(codex_probe());
-    let claude = claude_probe().await;
-    let codex = codex.await.ok().flatten();
+/// Probes the requested providers (`None` = all) concurrently; a failing
+/// provider is omitted, never an error.
+pub async fn probe_selected(only: Option<Vec<String>>) -> Vec<LimitProvider> {
+    let want = |id: &str| only.as_ref().map_or(true, |o| o.iter().any(|x| x == id));
+    let codex = want("codex").then(|| tauri::async_runtime::spawn(probe_codex()));
+    let claude = if want("claude") { probe_claude(default_paths()).await } else { None };
+    let codex = match codex {
+        Some(handle) => handle.await.ok().flatten(),
+        None => None,
+    };
     claude.into_iter().chain(codex).collect()
 }
 
 #[cfg(test)]
-mod limits_tests {
+mod tests {
     use super::*;
+    use serde_json::json;
 
-    const NOW: i64 = 1_800_000_000_000;
+    const NOW: f64 = 1_800_000_000.0;
+    fn future_ms() -> f64 { (NOW + 3600.0) * 1000.0 }
+    fn past_ms() -> f64 { (NOW - 60.0) * 1000.0 }
 
-    fn creds(extra: &str, tok: &str) -> String {
-        format!(r#"{{"claudeAiOauth":{{"accessToken":"{tok}"{extra}}}}}"#)
+    fn auth(accounts: Value, active: Option<&str>) -> Vec<u8> {
+        let mut j = json!({ "anthropic_accounts": accounts });
+        if let Some(a) = active {
+            j["active_anthropic_account"] = json!(a);
+        }
+        serde_json::to_vec(&j).unwrap()
     }
 
     #[test]
-    fn creds_valid() {
-        let t = creds(r#","expiresAt":1900000000000"#, "sk-test-fake");
-        assert_eq!(parse_claude_credentials(&t, NOW).as_deref(), Some("sk-test-fake"));
+    fn active_account_wins() {
+        let d = auth(json!([
+            {"label": "a", "access": "tok-a", "expires": future_ms()},
+            {"label": "b", "access": "tok-b", "expires": future_ms()}
+        ]), Some("b"));
+        assert_eq!(jcode_access_token(&d, NOW).as_deref(), Some("tok-b"));
     }
 
     #[test]
-    fn creds_expired_seconds() {
-        let t = creds(r#","expiresAt":1700000000"#, "sk-test-fake");
-        assert_eq!(parse_claude_credentials(&t, NOW), None);
+    fn falls_back_to_first_account_when_active_unknown() {
+        let one = json!([{"label": "a", "access": "tok-a", "expires": future_ms()}]);
+        assert_eq!(jcode_access_token(&auth(one.clone(), Some("gone")), NOW).as_deref(), Some("tok-a"));
+        assert_eq!(jcode_access_token(&auth(one, None), NOW).as_deref(), Some("tok-a"));
     }
 
     #[test]
-    fn creds_expired_ms() {
-        let t = creds(r#","expiresAt":1700000000000"#, "sk-test-fake");
-        assert_eq!(parse_claude_credentials(&t, NOW), None);
+    fn expired_token_is_skipped() {
+        let d = auth(json!([{"label": "a", "access": "tok-a", "expires": past_ms()}]), Some("a"));
+        assert_eq!(jcode_access_token(&d, NOW), None);
     }
 
     #[test]
-    fn creds_missing_expiry() {
-        let t = creds("", "sk-test-fake");
-        assert!(parse_claude_credentials(&t, NOW).is_some());
+    fn malformed_or_empty_is_none() {
+        assert_eq!(jcode_access_token(b"not json", NOW), None);
+        assert_eq!(jcode_access_token(b"{}", NOW), None);
+        assert_eq!(jcode_access_token(&auth(json!([]), None), NOW), None);
+        let blank = auth(json!([{"label": "a", "access": "", "expires": future_ms()}]), Some("a"));
+        assert_eq!(jcode_access_token(&blank, NOW), None);
     }
 
     #[test]
-    fn creds_empty_token() {
-        assert_eq!(parse_claude_credentials(&creds("", ""), NOW), None);
+    fn expiry_units() {
+        assert!(is_expired(Some(&json!((NOW - 1.0) * 1000.0)), NOW), "ms, past");
+        assert!(!is_expired(Some(&json!((NOW + 60.0) * 1000.0)), NOW), "ms, future");
+        assert!(is_expired(Some(&json!(NOW - 1.0)), NOW), "seconds, past");
+        assert!(!is_expired(Some(&json!(NOW + 60.0)), NOW), "seconds, future");
+        assert!(!is_expired(None, NOW), "unknown expiry: let the API decide");
+        assert!(!is_expired(Some(&json!("soon")), NOW));
     }
 
     #[test]
-    fn creds_malformed() {
-        assert_eq!(parse_claude_credentials("{not json", NOW), None);
-    }
-
-    fn win<'a>(l: &'a ProviderLimit, label: &str) -> &'a LimitWindow {
-        l.windows.iter().find(|w| w.label == label).unwrap()
-    }
-
-    #[test]
-    fn usage_both() {
-        let b = br#"{"five_hour":{"utilization":42.5,"resets_at":1800000000},"seven_day":{"utilization":10,"resets_at":null}}"#;
-        let l = parse_claude_usage(b).unwrap();
-        assert_eq!(l.id, "claude");
-        assert_eq!(l.windows.len(), 2);
-        assert_eq!(win(&l, "session").used_pct, 42.5);
-        assert_eq!(win(&l, "weekly").used_pct, 10.0);
-        assert_eq!(win(&l, "weekly").resets_at_ms, None);
+    fn claude_code_credentials_shape() {
+        let ok = serde_json::to_vec(&json!({"claudeAiOauth": {"accessToken": "cc", "expiresAt": future_ms()}})).unwrap();
+        assert_eq!(claude_code_access_token(&ok, NOW).as_deref(), Some("cc"));
+        let old = serde_json::to_vec(&json!({"claudeAiOauth": {"accessToken": "cc", "expiresAt": past_ms()}})).unwrap();
+        assert_eq!(claude_code_access_token(&old, NOW), None);
+        // A jcode file is not mistaken for Claude Code credentials.
+        let j = auth(json!([{"label": "a", "access": "tok-a"}]), Some("a"));
+        assert_eq!(claude_code_access_token(&j, NOW), None);
     }
 
     #[test]
-    fn usage_only_weekly() {
-        let l = parse_claude_usage(br#"{"seven_day":{"utilization":3}}"#).unwrap();
-        assert_eq!(l.windows.len(), 1);
-        assert_eq!(l.windows[0].label, "weekly");
-        assert_eq!(l.windows[0].resets_at_ms, None);
+    fn claude_keeps_both_windows_with_resets() {
+        let body = json!({
+            "five_hour": {"utilization": 37.0, "resets_at": "2026-10-02T23:59:59.536032+00:00"},
+            "seven_day": {"utilization": 79.0, "resets_at": "2026-10-05T03:59:59.536051+00:00"}
+        });
+        let p = claude_provider(&body).unwrap();
+        assert_eq!(p.windows.iter().map(|w| w.label.as_str()).collect::<Vec<_>>(), ["Session", "Weekly"]);
+        assert!((p.windows[0].fraction_left - 0.63).abs() < 1e-9);
+        assert!((p.windows[1].fraction_left - 0.21).abs() < 1e-9);
+        assert_eq!(p.windows[0].period, 18_000.0);
+        assert_eq!(p.windows[1].period, 604_800.0);
+        assert!(p.windows.iter().all(|w| w.resets_at.is_some()));
     }
 
     #[test]
-    fn usage_neither() {
-        assert!(parse_claude_usage(br#"{"other":{}}"#).is_none());
-        assert!(parse_claude_usage(b"garbage").is_none());
+    fn claude_clamps_and_skips_missing_windows() {
+        let p = claude_provider(&json!({"five_hour": {"utilization": 130}, "seven_day": null})).unwrap();
+        assert_eq!(p.windows.len(), 1);
+        assert_eq!(p.windows[0].fraction_left, 0.0);
+        assert_eq!(p.windows[0].resets_at, None);
+        assert_eq!(claude_provider(&json!({"error": "x"})), None);
     }
 
     #[test]
-    fn usage_clamped() {
-        let l = parse_claude_usage(
-            br#"{"five_hour":{"utilization":120},"seven_day":{"utilization":-5}}"#,
-        )
-        .unwrap();
-        assert_eq!(win(&l, "session").used_pct, 100.0);
-        assert_eq!(win(&l, "weekly").used_pct, 0.0);
-    }
-
-    #[test]
-    fn usage_resets_epoch() {
-        let l = parse_claude_usage(br#"{"five_hour":{"utilization":1,"resets_at":1800000000}}"#)
-            .unwrap();
-        assert_eq!(l.windows[0].resets_at_ms, Some(1_800_000_000_000));
-        let l = parse_claude_usage(br#"{"five_hour":{"utilization":1,"resets_at":1800000000123}}"#)
-            .unwrap();
-        assert_eq!(l.windows[0].resets_at_ms, Some(1_800_000_000_123));
+    fn candidates_dedupe_and_skip_unreadable() {
+        let dir = std::env::temp_dir().join(format!("ap-limits-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let cc = dir.join("cc.json");
+        let jc = dir.join("auth.json");
+        std::fs::write(&cc, serde_json::to_vec(&json!({"claudeAiOauth": {"accessToken": "same"}})).unwrap()).unwrap();
+        std::fs::write(&jc, auth(json!([{"label": "a", "access": "same"}, {"label": "b", "access": "other"}]), Some("a"))).unwrap();
+        let got = candidate_tokens(&[dir.join("missing.json"), cc, jc], NOW);
+        assert_eq!(got, vec!["same".to_string()]);
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     fn cx(extra: &str, tok: &str) -> String {
         format!(r#"{{"tokens":{{"access_token":"{tok}"{extra}}}}}"#)
+    }
+
+    fn win<'a>(l: &'a LimitProvider, label: &str) -> &'a LimitWindow {
+        l.windows.iter().find(|w| w.label == label).unwrap()
     }
 
     #[test]
@@ -501,28 +530,30 @@ mod limits_tests {
     fn codex_headers_only() {
         let l = parse_codex_usage(&[H1, H2], b"garbage", NOW).unwrap();
         assert_eq!(l.id, "codex");
-        assert_eq!(l.name, "Codex");
-        assert_eq!(win(&l, "session").used_pct, 30.0);
-        assert_eq!(win(&l, "weekly").used_pct, 60.5);
-        assert_eq!(win(&l, "weekly").resets_at_ms, None);
+        assert_eq!(l.display_name, "Codex");
+        assert!((win(&l, "Session").fraction_left - 0.7).abs() < 1e-9);
+        assert!((win(&l, "Weekly").fraction_left - 0.395).abs() < 1e-9);
+        assert_eq!(win(&l, "Session").period, 18_000.0);
+        assert_eq!(win(&l, "Weekly").period, 604_800.0);
+        assert_eq!(win(&l, "Weekly").resets_at, None);
     }
 
     #[test]
     fn codex_body_only() {
         let b = br#"{"rate_limit":{"primary_window":{"used_percent":12,"resets_in_seconds":90},"secondary_window":{"used_percent":40}}}"#;
         let l = parse_codex_usage(&[], b, NOW).unwrap();
-        assert_eq!(win(&l, "session").used_pct, 12.0);
-        assert_eq!(win(&l, "session").resets_at_ms, Some(NOW + 90_000));
-        assert_eq!(win(&l, "weekly").used_pct, 40.0);
+        assert!((win(&l, "Session").fraction_left - 0.88).abs() < 1e-9);
+        assert_eq!(win(&l, "Session").resets_at.as_deref(), Some("1800000090"));
+        assert!((win(&l, "Weekly").fraction_left - 0.6).abs() < 1e-9);
     }
 
     #[test]
     fn codex_headers_override_body() {
         let b = br#"{"rate_limit":{"primary_window":{"used_percent":99,"reset_after_seconds":60},"secondary_window":{"used_percent":98}}}"#;
         let l = parse_codex_usage(&[H1], b, NOW).unwrap();
-        assert_eq!(win(&l, "session").used_pct, 30.0);
-        assert_eq!(win(&l, "session").resets_at_ms, Some(NOW + 60_000));
-        assert_eq!(win(&l, "weekly").used_pct, 98.0);
+        assert!((win(&l, "Session").fraction_left - 0.7).abs() < 1e-9);
+        assert_eq!(win(&l, "Session").resets_at.as_deref(), Some("1800000060"));
+        assert!((win(&l, "Weekly").fraction_left - 0.02).abs() < 1e-9);
     }
 
     fn primary(w: &str) -> Vec<u8> {
@@ -530,41 +561,30 @@ mod limits_tests {
     }
 
     #[test]
-    fn codex_reset_at_wins() {
+    fn codex_reset_at_wins_in_seconds_or_ms() {
         let b = primary(r#""reset_at":1800000600,"reset_after_seconds":60"#);
         let l = parse_codex_usage(&[], &b, NOW).unwrap();
-        assert_eq!(l.windows[0].resets_at_ms, Some(1_800_000_600_000));
-    }
-
-    #[test]
-    fn codex_reset_at_ms_and_relative_only() {
+        assert_eq!(l.windows[0].resets_at.as_deref(), Some("1800000600"));
         let b = primary(r#""reset_at":1800000600123"#);
         let l = parse_codex_usage(&[], &b, NOW).unwrap();
-        assert_eq!(l.windows[0].resets_at_ms, Some(1_800_000_600_123));
-        let b = primary(r#""reset_after_seconds":120"#);
-        let l = parse_codex_usage(&[], &b, NOW).unwrap();
-        assert_eq!(l.windows[0].resets_at_ms, Some(NOW + 120_000));
+        assert_eq!(l.windows[0].resets_at.as_deref(), Some("1800000600"));
     }
 
     #[test]
     fn codex_reset_huge_or_negative_seconds() {
-        for s in ["1e16", "1e300", "-30"] {
-            let b = primary(&format!(r#""reset_after_seconds":{s}"#));
-            let l = parse_codex_usage(&[], &b, NOW).unwrap();
-            match l.windows[0].resets_at_ms {
-                Some(ms) => assert!(ms >= NOW),
-                None => assert_eq!(s, "-30"),
-            }
+        for s in ["1e16", "1e300"] {
+            let l = parse_codex_usage(&[], &primary(&format!(r#""reset_after_seconds":{s}"#)), NOW).unwrap();
+            assert_eq!(l.windows[0].resets_at.as_deref(), Some("4102444800"));
         }
-        let l = parse_codex_usage(&[], &primary(r#""reset_after_seconds":1e300"#), i64::MAX).unwrap();
-        assert_eq!(l.windows[0].resets_at_ms, Some(i64::MAX));
+        let l = parse_codex_usage(&[], &primary(r#""reset_after_seconds":-30"#), NOW).unwrap();
+        assert_eq!(l.windows[0].resets_at, None);
     }
 
     #[test]
     fn codex_one_window_none_and_clamp() {
         let l = parse_codex_usage(&[H2], b"", NOW).unwrap();
         assert_eq!(l.windows.len(), 1);
-        assert_eq!(l.windows[0].label, "weekly");
+        assert_eq!(l.windows[0].label, "Weekly");
         assert!(parse_codex_usage(&[], b"{}", NOW).is_none());
         assert!(parse_codex_usage(&[("x-codex-primary-used-percent", "abc")], b"", NOW).is_none());
         let l = parse_codex_usage(
@@ -573,32 +593,7 @@ mod limits_tests {
             NOW,
         )
         .unwrap();
-        assert_eq!(win(&l, "session").used_pct, 100.0);
-        assert_eq!(win(&l, "weekly").used_pct, 0.0);
-    }
-
-    fn reset_of(s: &str) -> Option<i64> {
-        let b = format!(r#"{{"five_hour":{{"utilization":1,"resets_at":"{s}"}}}}"#);
-        parse_claude_usage(b.as_bytes()).unwrap().windows[0].resets_at_ms
-    }
-
-    #[test]
-    fn usage_resets_iso() {
-        // 2027-01-15T08:00:00Z == 1800000000
-        assert_eq!(reset_of("2027-01-15T08:00:00Z"), Some(1_800_000_000_000));
-        assert_eq!(reset_of("2027-01-15T10:00:00+02:00"), Some(1_800_000_000_000));
-        assert_eq!(reset_of("2027-01-15T03:30:00-04:30"), Some(1_800_000_000_000));
-        assert_eq!(reset_of("2027-01-15T08:00:00.500Z"), Some(1_800_000_000_500));
-        assert_eq!(
-            reset_of("2027-01-15T08:00:00.123456+00:00"),
-            Some(1_800_000_000_123)
-        );
-        assert_eq!(reset_of("garbage"), None);
-    }
-
-    #[test]
-    fn usage_integer_utilization() {
-        let l = parse_claude_usage(br#"{"five_hour":{"utilization":7}}"#).unwrap();
-        assert_eq!(l.windows[0].used_pct, 7.0);
+        assert_eq!(win(&l, "Session").fraction_left, 0.0);
+        assert_eq!(win(&l, "Weekly").fraction_left, 1.0);
     }
 }

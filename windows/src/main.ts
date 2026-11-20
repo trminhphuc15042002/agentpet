@@ -1,11 +1,10 @@
 import { listen, emit } from "@tauri-apps/api/event";
 import { invoke } from "@tauri-apps/api/core";
-import { getCurrentWindow } from "@tauri-apps/api/window";
-import { Pet } from "./pet";
+import { Pet, HIT_PAD } from "./pet";
 import { SessionStore, aggregateMood, basename, type AgentEventPayload, type SubagentEventPayload } from "./state";
 import { BubbleRenderer, groupSessions, readBubbleConfig } from "./bubble";
-import { bubbleLayout, maintenanceSig, shouldSendResize } from "./geometry";
-import { loadCatalog, savedSlug, saveSlug } from "./catalog";
+import { maintenanceSig } from "./geometry";
+import { loadCatalog, savedSlug, saveSlug, rememberPetUrl, selectedPetUrl } from "./catalog";
 import { t, setLang, type Lang } from "./i18n";
 import { bubbleLines, PET_CHAT } from "./activity";
 import * as care from "./care";
@@ -17,7 +16,8 @@ import * as projectpets from "./projectpets";
 import * as audio from "./audio";
 import { focusActive, WaitingReminders, sessionKey, readLastEvents } from "./companion";
 import { pettingLine } from "./personality";
-import { refreshLimits, serveLimits } from "./limits";
+import * as limits from "./limits";
+import { projectLabel } from "./projectnames";
 
 // Which project THIS pet window represents. `null` = the main window (the
 // default single pet). Split-pet spawns extra windows with `?project=<id>`.
@@ -125,7 +125,7 @@ audio.bindAudioUnlock();
     if (url) { pet.load(url); return; }
   }
   // Library selection (Browse/Create) wins; legacy ap_pet_custom still honoured.
-  const url = localStorage.getItem("ap_pet_custom") || localStorage.getItem("ap_pet_url");
+  const url = selectedPetUrl();
   if (url) { pet.load(url); return; }
   // First run: no selection yet , pick a starter from the catalog.
   for (;;) {
@@ -185,6 +185,8 @@ function pickMoodLine(mood: string) {
   // simple-bubble mode (multi-agent off) always has something to say.
   let pool = bubbleLines(null, mood);
   if (!pool.length) pool = PET_CHAT[mood] ?? [];
+  // A nearly spent subscription makes the idle pet anxious (mac CareChat.idlePool).
+  if (mood === "idle" && limits.limitLow(limits.cached())) pool = [...pool, ...limits.ANXIOUS.map(t)];
   moodLine = pool.length ? pool[Math.floor(Math.random() * pool.length)] : "";
 }
 
@@ -266,8 +268,7 @@ function render() {
   }
 
   snugBubble();
-  applyBubbleGeometry();
-  hugOverlay();
+  reportHitRect();
   // One global tray icon , the main window reports it, counting ALL sessions
   // (not just this window's owned subset).
   if (IS_MAIN) reportTrayStatus(store.active());
@@ -293,11 +294,8 @@ function maintain() {
   if (maintenanceSig(store.snapshot()) !== before) render();
 }
 
-if (IS_MAIN) { serveLimits(); void refreshLimits(); }
-
 function startUiTimers() {
   if (document.hidden) return;
-  if (IS_MAIN) void refreshLimits();
   if (!maintTimer) maintTimer = window.setInterval(maintain, 500);
   if (!clockTimer) clockTimer = window.setInterval(() => bubble.tickClocks(), 1000);
   if (!dirtyTimer) dirtyTimer = window.setInterval(() => {
@@ -306,8 +304,6 @@ function startUiTimers() {
   if (!hungerTimer) hungerTimer = window.setInterval(() => {
     const slug = myPetSlug();
     if (slug) flashReactive(reactive.evaluate("hunger", care.hunger(care.stateFor(slug))));
-    // refreshLimits no-ops inside its 5 min cache window and while the toggle is off.
-    if (IS_MAIN) void refreshLimits().then(() => flashReactive(reactive.evaluateRateLimit()));
   }, 60_000);
   bubble.resume();
 }
@@ -325,6 +321,16 @@ document.addEventListener("visibilitychange", () => {
   else { startUiTimers(); render(); }
 });
 startUiTimers();
+// Subscription limits: only the main window calls the provider (every 5 min,
+// like mac NativeUsageProbe); project windows read the shared cache. Each
+// window comments on the tightest visible window via the rateLimit metric.
+// Opt-in: refresh() and cached() are empty while the Settings toggle is off.
+async function pollLimits() {
+  const found = IS_MAIN ? await limits.refresh() : limits.cached();
+  flashReactive(reactive.evaluate("rateLimit", limits.lowestFractionLeft(found)));
+}
+setTimeout(() => { void pollLimits(); }, IS_MAIN ? 5_000 : 15_000);
+setInterval(() => { void pollLimits(); }, limits.POLL_MS);
 
 // Pull the bubble down over the canvas's empty headroom so it sits right
 // above the pet's head (the sprite rarely fills the whole canvas height).
@@ -332,26 +338,6 @@ function snugBubble() {
   const gap = Math.max(0, canvas.clientHeight * pet.headroom - 4);
   petRoot.style.setProperty("--bubble-snug", `${gap}px`);
 }
-
-let windowWidthLogical = 260;
-let petOffsetLogical = 0;
-
-function applyBubbleGeometry() {
-  const bw = bubbleEl.hidden ? 0 : bubbleEl.offsetWidth;
-  const layout = bubbleLayout(petOffsetLogical, windowWidthLogical, bw);
-  petRoot.style.setProperty("--pet-offset", `${petOffsetLogical}px`);
-  petRoot.style.setProperty("--bubble-shift", `${layout.bubbleShift}px`);
-  petRoot.style.setProperty("--tail-shift", `${layout.tailShift}px`);
-}
-
-listen<{ petOffset: number; windowWidth: number }>("pet-geometry", (e) => {
-  if (typeof e.payload?.petOffset === "number") petOffsetLogical = e.payload.petOffset;
-  if (typeof e.payload?.windowWidth === "number" && e.payload.windowWidth > 0) {
-    windowWidthLogical = e.payload.windowWidth;
-  }
-  applyBubbleGeometry();
-  reportHitRect();
-});
 
 // Tray tooltip mirrors the macOS menu bar count (N working / N waiting).
 let lastTray = "";
@@ -401,10 +387,10 @@ function maybeNotify(e: AgentEventPayload) {
   if (e.state === "done" && ownsProject(e.project)) {
     const slug = myPetSlug();
     if (slug) { care.mutate(slug, (s) => care.recordMeal(s)); emit("care-updated"); sync.schedulePush(); evaluateCareMetrics(); }
-    if (e.project) usage.recordSession(e.project, e.agent);
+    usage.recordSession(e.project, e.agent);
     const now = Date.now();
     history.log({
-      id: e.session, agent: e.agent, project: e.project ? basename(e.project) : "",
+      id: e.session, agent: e.agent, project: e.project ? projectLabel(e.project) : "",
       title: e.title || "", startedAt: sessionStarts.get(key) ?? now, endedAt: now,
     });
   }
@@ -414,11 +400,17 @@ function maybeNotify(e: AgentEventPayload) {
   if (e.state === "done" && isFocused()) return;
   void audio.playSound(e.state === "done" ? "done" : "waiting");
   if (!notifyReady || localStorage.getItem("ap_notify") === "0") return;
-  const proj = (e.project ? basename(e.project) : "") || e.agent;
+  const proj = projectLabel(e.project || "") || e.agent;
   // Same copy as the macOS notifications.
   const title = e.state === "done" ? `${proj} ${t("finished")}` : `${proj} ${t("needs input")}`;
+  // jcode only: its hooks carry the agent's opening line (what this turn did),
+  // with the session title as a fallback (it goes stale, one per session). Other
+  // agents keep the generic text, like macOS.
+  const doneBody = e.agent === "jcode"
+    ? ((e.message ?? "").trim() || (store.snapshot().find((s) => s.agent === e.agent && s.session === e.session)?.title ?? "").trim()).slice(0, 200)
+    : "";
   const body = e.state === "done"
-    ? t("Agent completed its turn")
+    ? (doneBody || t("Agent completed its turn"))
     : (e.message || t("Waiting for you"));
   try { sendNotification({ title, body }); } catch {}
 }
@@ -482,6 +474,10 @@ listen<{ id: string; session: string }>("agent-approval-resolved", (e) => {
   store.clearApproval(e.payload.session);
   render();
 });
+listen<{ agent: string; session: string; title: string }>("agent-title", (e) => {
+  store.setTitle(e.payload.agent, e.payload.session, e.payload.title);
+  render();
+});
 listen<string>("agent-end", (e) => {
   for (const k of [...lastState.keys()]) if (k.endsWith(`:${e.payload}`)) lastState.delete(k);
   for (const k of [...sessionStarts.keys()]) if (k.endsWith(`:${e.payload}`)) sessionStarts.delete(k);
@@ -496,7 +492,7 @@ listen<{ agent: string; session: string; project: string; tokens: number; cost?:
   if (n <= 0) return;
   const p = e.payload;
   if (!ownsProject(p.project)) return;
-  if (p.project) usage.recordTokens(p.project, p.agent, n, p.cost || 0, { input: p.input, output: p.output, cacheRead: p.cacheRead, cacheWrite: p.cacheWrite });
+  usage.recordTokens(p.project, p.agent, n, p.cost || 0, { input: p.input, output: p.output, cacheRead: p.cacheRead, cacheWrite: p.cacheWrite });
   const slug = myPetSlug();
   if (!slug) return;
   care.mutate(slug, (s) => care.feedTokens(s, n));
@@ -559,12 +555,12 @@ listen<string>("diagnostics-test", (e) => {
 listen<{ slug: string; url: string }>("set-pet", (e) => {
   pet.load(e.payload.url);
   saveSlug(e.payload.slug);
-  localStorage.setItem("ap_pet_url", e.payload.url);
+  rememberPetUrl(e.payload.url);
 });
 // Language changed from Settings , re-render the bubble in the new language.
 listen<Lang>("lang-changed", (e) => { setLang(e.payload); render(); });
 // Bubble theme / opacity / messages changed from Settings.
-listen("bubble-changed", () => { if (IS_MAIN) void refreshLimits(); applyBubble(); applyPet(); moodLine = ""; armReminder(); render(); });
+listen("bubble-changed", () => { if (IS_MAIN) void pollLimits(); applyBubble(); applyPet(); moodLine = ""; armReminder(); render(); });
 
 // Tray "Check for updates" (Rust emits this to the main pet window only). The
 // popover has a labelled Updates button, but on Linux appindicator can't open
@@ -588,30 +584,40 @@ listen("check-updates", async () => {
   }
 });
 
+// Last interactive region in CSS px (set by reportHitRect below). Where the OS
+// can't make the transparent part click-through (Wayland: cursor_position
+// fails, so the whole window stays interactive) a press on empty space must
+// still do nothing, so the document-wide handlers check it. Same region Rust
+// uses on Windows (sprite bounds + visible bubble), so the gap between bubble
+// and sprite still counts, unlike the sprite-only alpha test `pet.hitTest`.
+let hitCss: { left: number; top: number; right: number; bottom: number } | null = null;
+function inHitRect(e: MouseEvent): boolean {
+  const r = hitCss;
+  if (!r) return true; // not reported yet: stay interactive
+  return e.clientX >= r.left && e.clientX <= r.right && e.clientY >= r.top && e.clientY <= r.bottom;
+}
+
 // --- interactions ------------------------------------------------------------
-// Drag works only when grabbing the PET SPRITE itself or the bubble , clicks
-// on the transparent area beside the pet fall through (like the macOS panel,
-// where transparent pixels never catch the mouse).
-canvas.addEventListener("mousedown", async (e) => {
+// Rust makes the window click-through outside the pet's hit rect (sprite box
+// + bubble), so any left press that reaches this document is on the pet.
+// Listen on the whole document: the hit rect also covers the gap between the
+// bubble and the sprite and the empty sides of the bubble row, which are
+// body/#pet-root, not the canvas. Pressing there used to be swallowed (not
+// passed to the window below) yet did nothing, so the pet felt stuck.
+document.addEventListener("mousedown", async (e) => {
   if (e.button !== 0) return;
-  // While the sheet is still loading there is no sprite rect yet , allow the
-  // drag anyway so the pet is never untouchable.
-  if (pet.spriteRect && !pet.hitTest(e.offsetX, e.offsetY)) return;
+  // Bubble controls (fold, carousel dots, dismiss, Warp-focus rows) keep their clicks.
+  if ((e.target as HTMLElement).closest("button, a, input, .car-dot, .focusable, [data-nodrag]")) return;
+  if (!inHitRect(e)) return;
   emit("popover-close", null);
-  await getCurrentWindow().startDragging();
+  await invoke("drag_pet");
 });
-bubbleEl.addEventListener("mousedown", async (e) => {
-  if (e.button !== 0) return;
-  emit("popover-close", null);
-  await getCurrentWindow().startDragging();
-});
-canvas.addEventListener("contextmenu", (e) => {
+// Right-click opens the pet's stats card (macOS PetStatsView); the tray icon
+// opens the quick popover.
+document.addEventListener("contextmenu", (e) => {
   e.preventDefault();
-  if (pet.hitTest(e.offsetX, e.offsetY)) invoke("open_popover").catch(() => {});
-});
-bubbleEl.addEventListener("contextmenu", (e) => {
-  e.preventDefault();
-  invoke("open_popover").catch(() => {});
+  if (!inHitRect(e)) return;
+  invoke("open_stats", { pet: myPetSlug() }).catch(() => {});
 });
 
 // Report the interactive region (physical px) for Windows click-through: the
@@ -620,68 +626,8 @@ bubbleEl.addEventListener("contextmenu", (e) => {
 const petRoot = document.getElementById("pet-root") as HTMLElement;
 let lastHitSig = "";
 
-const RESIZE_TOL = 1;
-let resizeInflight = false;
-let resizeQueued: { w: number; h: number } | null = null;
-let shrinkTimer: number | null = null;
-
-function paddedSize(w: number, h: number) {
-  return { w: w + 4, h: h + 4 };
-}
-
-function viewportSize() {
-  return { w: window.innerWidth, h: window.innerHeight };
-}
-
-async function sendResize(size: { w: number; h: number }) {
-  resizeQueued = size;
-  if (resizeInflight) return;
-  resizeInflight = true;
-  try {
-    while (resizeQueued) {
-      const next = resizeQueued;
-      resizeQueued = null;
-      const actual = viewportSize();
-      if (!shouldSendResize(next, actual, RESIZE_TOL)) continue;
-      try {
-        const result = await invoke<{ petOffset: number; windowWidth: number }>("resize_pet_window", {
-          width: next.w,
-          height: next.h,
-          petWidth: canvas.offsetWidth || 160,
-        });
-        petOffsetLogical = result.petOffset;
-        windowWidthLogical = result.windowWidth;
-        applyBubbleGeometry();
-        reportHitRect();
-      } catch (err) {
-        invoke("log_debug", { msg: `resize_pet_window failed: ${err}` }).catch(() => {});
-      }
-    }
-  } finally {
-    resizeInflight = false;
-    if (resizeQueued) void sendResize(resizeQueued);
-  }
-}
-
-function onContentSize(w: number, h: number) {
-  if (w <= 0 || h <= 0) return;
-  const target = paddedSize(w, h);
-  const actual = viewportSize();
-  const grow = {
-    // A native resize event can reach the WebView before invoke resolves.
-    // A remembered larger size would undo that shrink and start a grow/shrink
-    // feedback loop. Only current content and the live viewport matter here.
-    w: Math.max(target.w, actual.w),
-    h: Math.max(target.h, actual.h),
-  };
-  if (grow.w > actual.w + RESIZE_TOL || grow.h > actual.h + RESIZE_TOL) {
-    void sendResize(grow);
-  }
-  if (shrinkTimer) clearTimeout(shrinkTimer);
-  shrinkTimer = window.setTimeout(() => { void sendResize(target); }, 50);
-}
-
-function overlayUnion() {
+function reportHitRect() {
+  const d = window.devicePixelRatio || 1;
   const rects: { left: number; top: number; right: number; bottom: number }[] = [];
   if (!bubbleEl.hidden) {
     const b = bubbleEl.getBoundingClientRect();
@@ -702,36 +648,46 @@ function overlayUnion() {
       right: cr.left + (sr.x + sr.w) * kx,
       bottom: cr.top + (sr.y + sr.h) * ky,
     });
-  } else if (cr.width > 0) {
+  } else {
     rects.push({ left: cr.left, top: cr.top, right: cr.right, bottom: cr.bottom });
   }
-  if (!rects.length) return null;
+  // The union below stays the "visible bounds" (keeps the pet on screen). Clicks
+  // use the PARTS (bubble, party badge, sprite) separately: a wide bubble above a
+  // narrow pet otherwise makes one big box that also grabs the empty corners
+  // beside the pet.
+  const pad = HIT_PAD; // px of slack so grabbing right at the edge still works
+  const parts: number[][] = [];
+  for (const el of [bubbleEl, partyBadge]) {
+    if (el.hidden) continue;
+    const b = el.getBoundingClientRect();
+    if (b.width > 0) parts.push([(b.left - pad) * d, (b.top - pad) * d, (b.width + 2 * pad) * d, (b.height + 2 * pad) * d]);
+  }
+  if (pet.silhouette.length && canvas.width > 0) {
+    // The pet's outline (bands of the current frame), not its bounding box.
+    const kx = cr.width / canvas.width, ky = cr.height / canvas.height;
+    for (const b of pet.silhouette) {
+      parts.push([(cr.left + b.x * kx - pad) * d, (cr.top + b.y * ky - pad) * d, (b.w * kx + 2 * pad) * d, (b.h * ky + 2 * pad) * d]);
+    }
+  } else {
+    parts.push([(cr.left - pad) * d, (cr.top - pad) * d, (cr.width + 2 * pad) * d, (cr.height + 2 * pad) * d]);
+  }
+  const sp = rects[rects.length - 1]; // the sprite alone (pushed last), for the off-screen clamp
   const left = Math.min(...rects.map((r) => r.left));
   const top = Math.min(...rects.map((r) => r.top));
   const right = Math.max(...rects.map((r) => r.right));
   const bottom = Math.max(...rects.map((r) => r.bottom));
-  return { left, top, right, bottom, w: right - left, h: bottom - top };
-}
-
-function reportHitRect() {
-  const d = window.devicePixelRatio || 1;
-  const u = overlayUnion();
-  if (!u) return;
-  const sig = `${d}:` + [u.left, u.top, u.right, u.bottom].map((v) => Math.round(v)).join(",");
+  hitCss = { left, top, right, bottom };
+  const sig = [left, top, right, bottom, sp.left, sp.top, sp.right, sp.bottom, ...parts.flat()].map((v) => Math.round(v)).join(",");
   if (sig === lastHitSig) return;
   lastHitSig = sig;
-  invoke("set_hit_rect", { x: u.left * d, y: u.top * d, w: u.w * d, h: u.h * d })
+  if (IS_MAIN) invoke("set_hit_parts", { parts }).catch(() => {});
+  invoke("set_hit_rect", { x: left * d, y: top * d, w: (right - left) * d, h: (bottom - top) * d,
+    sprite: [sp.left * d, sp.top * d, (sp.right - sp.left) * d, (sp.bottom - sp.top) * d] })
     .catch((err) => invoke("log_debug", { msg: `set_hit_rect failed: ${err}` }).catch(() => {}));
 }
-
-function hugOverlay() {
-  const u = overlayUnion();
-  if (u && u.w > 0 && u.h > 0) onContentSize(u.w, u.h);
-  reportHitRect();
-}
-
-new ResizeObserver(() => { hugOverlay(); }).observe(petRoot);
-window.addEventListener("resize", hugOverlay);
-hugOverlay();
+pet.onFrame = reportHitRect; // the outline changes with every animation frame
+new ResizeObserver(reportHitRect).observe(petRoot);
+window.addEventListener("resize", reportHitRect);
+reportHitRect();
 
 render();
